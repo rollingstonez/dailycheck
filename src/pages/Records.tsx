@@ -52,7 +52,7 @@ export default function Records() {
 
       {recs?.length === 0 && <div className="card empty">이 달의 기록이 없습니다.</div>}
       {recs?.map((r) => (
-        <button key={r.id} className="card list-card" onClick={() => go('records/' + r.id)}>
+        <button key={r.id} className="card list-card" onClick={() => go('records', r.id)}>
           <div className="grow">
             <div className="title">{prettyDate(r.date)}</div>
             <div className="muted">{r.checklistName} · {r.inspector}</div>

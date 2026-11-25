@@ -6,7 +6,8 @@
   "scripts": {
     "dev": "vite --host",
     "build": "tsc -b && vite build",
-    "preview": "vite preview --host"
+    "preview": "vite preview --host",
+    "mock": "node mock/sheet-server.mjs"
   },
   "dependencies": {
     "dexie": "^4.0.11",

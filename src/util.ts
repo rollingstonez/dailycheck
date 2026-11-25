@@ -29,13 +29,16 @@ export function isAbnormal(item: CheckItem, v: ItemValue | undefined): boolean {
     case 'yesno':
       return v !== (item.okAnswer ?? 'yes');
     case 'number': {
-      if (typeof v !== 'number') return false;
+      if (typeof v === 'string') v = parseFloat(v);
+      if (typeof v !== 'number' || isNaN(v)) return false;
       if (item.min !== undefined && v < item.min) return true;
       if (item.max !== undefined && v > item.max) return true;
       return false;
     }
-    case 'choice':
-      return typeof v === 'string' && (item.badOptions ?? []).includes(v);
+    case 'choice': {
+      const sv = String(v).toLowerCase();
+      return (item.badOptions ?? []).some((b) => b.toLowerCase() === sv);
+    }
     default:
       return false;
   }
@@ -55,7 +58,10 @@ export function criteriaText(item: CheckItem): string {
     if (item.min !== undefined) return `기준 ${item.min}${u} 이상`;
     if (item.max !== undefined) return `기준 ${item.max}${u} 이하`;
   }
-  if (item.type === 'choice' && item.badOptions?.length) return `이상: ${item.badOptions.join(', ')}`;
+  if (item.type === 'choice' && item.badOptions?.length) {
+    const ok = (item.options ?? []).filter((o) => !item.badOptions!.includes(o));
+    return ok.length ? `정상: ${ok.join('/')}` : '';
+  }
   return '';
 }
 
@@ -67,19 +73,40 @@ export function formatValue(item: CheckItem, v: ItemValue | undefined): string {
   return String(v);
 }
 
-/** 사진을 긴 변 1280px JPEG로 줄여 저장 공간을 아낀다 */
-export async function compressImage(file: File, maxSide = 1280): Promise<Blob> {
+/** 사진을 긴 변 1280px JPEG로 줄이고, 아래쪽에 날짜·시간 워터마크를 찍는다 */
+export async function compressImage(file: File, stampLines: string[] = [], maxSide = 1280): Promise<Blob> {
   const bmp = await createImageBitmap(file);
   const scale = Math.min(1, maxSide / Math.max(bmp.width, bmp.height));
   const canvas = document.createElement('canvas');
   canvas.width = Math.round(bmp.width * scale);
   canvas.height = Math.round(bmp.height * scale);
-  canvas.getContext('2d')!.drawImage(bmp, 0, 0, canvas.width, canvas.height);
+  const ctx = canvas.getContext('2d')!;
+  ctx.drawImage(bmp, 0, 0, canvas.width, canvas.height);
   bmp.close();
+  if (stampLines.length) {
+    const fs = Math.max(16, Math.round(Math.min(canvas.width, canvas.height) / 26));
+    ctx.font = `bold ${fs}px -apple-system, "Apple SD Gothic Neo", "Noto Sans KR", sans-serif`;
+    ctx.textBaseline = 'bottom';
+    const pad = Math.round(fs * 0.5);
+    const lh = Math.round(fs * 1.3);
+    const w = Math.max(...stampLines.map((l) => ctx.measureText(l).width)) + pad * 2;
+    const h = lh * stampLines.length + pad * 2;
+    ctx.fillStyle = 'rgba(0,0,0,0.55)';
+    ctx.fillRect(0, canvas.height - h, Math.min(w, canvas.width), h);
+    ctx.fillStyle = '#fff';
+    stampLines.forEach((l, i) => ctx.fillText(l, pad, canvas.height - h + pad + lh * (i + 1)));
+  }
   return new Promise((res, rej) =>
     canvas.toBlob((b) => (b ? res(b) : rej(new Error('사진 변환 실패'))), 'image/jpeg', 0.8),
   );
 }
+
+/** 2026-11-25 14:32:05 (워터마크용) */
+export const stampNow = () => {
+  const d = new Date();
+  return `${toDateStr(d)} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+};
+export const hhmm = (d = new Date()) => `${pad(d.getHours())}:${pad(d.getMinutes())}`;
 
 /** CSV 파일 내려받기 (엑셀·구글 시트에서 한글이 깨지지 않도록 BOM 포함) */
 export function downloadCsv(filename: string, rows: (string | number)[][]) {

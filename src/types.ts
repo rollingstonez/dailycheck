@@ -27,6 +27,12 @@ export interface CheckItem {
   options?: string[];
   /** choice: 이상으로 보는 선택지 */
   badOptions?: string[];
+  /** 사진 버튼 표시 */
+  photo?: boolean;
+  /** 구글 시트 A열의 원래 글자 (시트에 쓸 때 행을 찾는 열쇠) */
+  sheetLabel?: string;
+  /** 구글 시트 B열 기준 원문 */
+  sheetCriteria?: string;
 }
 
 export interface Checklist {
@@ -34,6 +40,8 @@ export interface Checklist {
   name: string;
   description?: string;
   items: CheckItem[];
+  /** 구글 시트 탭에서 온 점검표면 그 탭 이름 */
+  sheetTab?: string;
   createdAt: number;
   updatedAt: number;
 }
@@ -55,8 +63,16 @@ export interface InspectionRecord {
   itemsSnapshot: CheckItem[];
   createdAt: number;
   updatedAt: number;
-  /** 서버 동기화 여부 (서버 연결 전에는 항상 false) */
+  /** 점검 시각 HH:mm */
+  time?: string;
+  /** 항목별 사진 (photos 표의 id) */
+  photos?: Record<string, string[]>;
+  /** 시트에 올라간 사진 링크 (항목별) */
+  photoLinks?: Record<string, string[]>;
+  /** 구글 시트에 반영 여부 (시트 연결이 없는 점검표는 항상 false) */
   synced: boolean;
+  /** 마지막 동기화 실패 사유 */
+  syncError?: string;
 }
 
 export interface Photo {
@@ -64,4 +80,6 @@ export interface Photo {
   recordId: string;
   blob: Blob;
   createdAt: number;
+  /** 시트(드라이브)에 올라간 주소 */
+  uploadedUrl?: string;
 }

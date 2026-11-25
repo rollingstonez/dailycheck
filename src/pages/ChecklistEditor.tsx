@@ -2,7 +2,8 @@ import { useEffect, useState } from 'react';
 import { db } from '../db';
 import { go } from '../App';
 import { ITEM_TYPE_LABEL, type CheckItem, type Checklist, type ItemType } from '../types';
-import { uid } from '../util';
+import { criteriaText, uid } from '../util';
+import { describeItem } from '../sheet/parse';
 
 export default function ChecklistEditor({ id }: { id: string }) {
   const [c, setC] = useState<Checklist | null | undefined>(undefined);
@@ -14,6 +15,7 @@ export default function ChecklistEditor({ id }: { id: string }) {
 
   if (c === undefined) return null;
   if (c === null) return <div className="page">점검표를 찾을 수 없습니다. <a href="#/checklists">목록으로</a></div>;
+  if (c.sheetTab) return <SheetPreview c={c} />;
 
   const patch = (p: Partial<Checklist>) => {
     setC({ ...c, ...p });
@@ -189,5 +191,41 @@ function NumField({ value, onChange }: { value?: number; onChange: (v: number | 
         onChange(s === '' || isNaN(n) ? undefined : n);
       }}
     />
+  );
+}
+
+/** 시트에서 온 점검표: 앱이 시트를 어떻게 읽었는지 보여 준다 (수정은 시트에서) */
+function SheetPreview({ c }: { c: Checklist }) {
+  return (
+    <div className="page">
+      <header className="top">
+        <a className="link" href="#/checklists">‹ 점검표</a>
+        <h1>{c.name}</h1>
+        <div className="muted small">📄 구글 시트 탭 · 항목 {c.items.length}개</div>
+      </header>
+      <div className="card notice small">
+        항목 추가·수정·순서 변경은 <b>구글 시트</b>에서 하세요. 앱에서 «동기화»하면 반영됩니다.
+        <br />B열 «기준»에 <code>on/off</code>, <code>100~150</code>, <code>40 이상</code>, <code>사진</code> 등을 적으면 입력 방식과 이상 판정이 정해집니다.
+      </div>
+      <div className="card">
+        {c.items.map((it, i) => (
+          <div key={it.id} className="kv">
+            <span className="num-sm">{i + 1}</span>
+            <div className="grow">
+              <div>
+                {it.label}
+                {it.unit && <span className="muted"> ({it.unit})</span>}
+              </div>
+              <div className="muted small">
+                {describeItem(it)}
+                {criteriaText(it) && ` · ${criteriaText(it)}`}
+                {it.photo && ' · 📷 사진'}
+              </div>
+            </div>
+            {it.sheetCriteria && <code className="small">{it.sheetCriteria}</code>}
+          </div>
+        ))}
+      </div>
+    </div>
   );
 }

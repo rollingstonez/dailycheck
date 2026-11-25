@@ -9,7 +9,7 @@ import ChecklistEditor from './pages/ChecklistEditor';
 
 /** 해시 주소(#/inspect/abc)로 화면 전환 — 서버 설정 없이 오프라인에서도 동작 */
 function useRoute() {
-  const get = () => location.hash.replace(/^#\/?/, '').split('/').filter(Boolean);
+  const get = () => location.hash.replace(/^#\/?/, '').split('/').filter(Boolean).map(decodeURIComponent);
   const [parts, setParts] = useState(get);
   useEffect(() => {
     const on = () => {
@@ -22,8 +22,9 @@ function useRoute() {
   return parts;
 }
 
-export const go = (path: string) => {
-  location.hash = '#/' + path;
+/** 예: go('inspect', checklistId) — 각 부분은 자동으로 주소용으로 변환 */
+export const go = (...parts: string[]) => {
+  location.hash = '#/' + parts.map(encodeURIComponent).join('/');
 };
 
 function useOnline() {
