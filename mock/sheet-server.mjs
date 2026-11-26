@@ -11,7 +11,9 @@ import { fileURLToPath } from 'node:url';
 const dir = path.dirname(fileURLToPath(import.meta.url));
 const ctx = vm.createContext({});
 vm.runInContext(fs.readFileSync(path.join(dir, '../apps-script/Code.gs'), 'utf8'), ctx);
-const { dc_read, dc_locate, dc_findRow, TOKEN } = ctx;
+const { dc_read, dc_locate, dc_findRow, dc_initApproved, dc_groupApproved, dc_applyApproval, dc_decide, dc_groupCorrections, TOKEN } = ctx;
+// 승인 비밀번호: 개발용 기본값 0000 (승인 비밀번호 입력 흐름을 시험하려고). 비우려면  ADMIN_PIN= npm run mock
+const PIN = process.env.ADMIN_PIN ?? '0000';
 const PORT = Number(process.env.PORT || 8787);
 
 const pad = (n) => String(n).padStart(2, '0');
@@ -50,12 +52,89 @@ function seed() {
 seed();
 
 const width = (g) => Math.max(...g.map((r) => r.length));
+/** 승인된 항목 목록 ( _승인본 탭 ): 처음 읽을 때 지금 시트를 기준으로 확정 */
+let approvedRows = null;
+/** 장부(_기록, 덧붙이기만)와 정정 내역(_정정) */
+const logRows = [];
+const corrRows = [];
+const stamp = () => new Date().toISOString().slice(0, 16).replace('T', ' ');
+
 function read() {
-  return {
-    ok: true,
-    name: '가짜 시트 (개발용)',
-    tabs: Object.entries(sheets).map(([tab, s]) => ({ tab, ...dc_read(s.grid, s.notes, fmt, YEAR) })),
-  };
+  const tabs = Object.entries(sheets).map(([tab, s]) => ({ tab, ...dc_read(s.grid, s.notes, fmt, YEAR) }));
+  if (!approvedRows) approvedRows = dc_initApproved(tabs, stamp());
+  return { ok: true, name: '가짜 시트 (개발용)', tabs, approved: dc_groupApproved(approvedRows), pinRequired: !!PIN, corrections: dc_groupCorrections(corrRows) };
+}
+
+function approve(b) {
+  if (PIN && String(b.pin || '') !== PIN) throw new Error('승인 비밀번호가 맞지 않습니다');
+  if (!approvedRows) throw new Error('먼저 앱에서 동기화하세요');
+  approvedRows = dc_applyApproval(approvedRows, b.tabs || [], b.removed || [], stamp());
+  return { ok: true };
+}
+
+/** 정정 (Code.gs 의 correct_ 와 같은 규칙) */
+function correct(b) {
+  if (PIN && String(b.pin || '') !== PIN) throw new Error('승인 비밀번호가 맞지 않습니다');
+  const reason = String(b.reason || '').trim();
+  if (!reason) throw new Error('정정 사유를 입력하세요');
+  const s = sheets[b.tab];
+  if (!s) throw new Error(`시트에 "${b.tab}" 탭이 없습니다`);
+  const loc = dc_locate(s.grid, b.date, fmt, YEAR);
+  if (loc.col === null) throw new Error('그 날짜의 기록이 없습니다');
+  const r = dc_findRow(s.grid.map((x) => String(x[0])), b.label);
+  if (r < 0) throw new Error(`시트에 "${b.label}" 항목이 없습니다`);
+  const cur = s.grid[r][loc.col];
+  if (dc_decide(cur, b.value) !== 'locked') throw new Error('정정할 값이 비어 있거나 기존 값과 같습니다');
+  const at = stamp();
+  s.grid[r][loc.col] = b.value;
+  const line = `✎ 정정 ${at}: ${cur} → ${b.value} (사유: ${reason})${b.inspector ? ' · ' + b.inspector : ''}`;
+  s.notes[r][loc.col] = s.notes[r][loc.col] ? s.notes[r][loc.col] + '\n' + line : line;
+  logRows.push([at, '정정', b.tab, b.date, b.label, b.value, cur, reason, b.inspector || '']);
+  corrRows.push([at, b.tab, b.date, b.label, cur, b.value, reason, b.inspector || '']);
+  return { ok: true };
+}
+
+/** 개발용: 누군가 시트에서 항목을 고치는 상황을 흉내 낸다 (실제 스크립트에는 없음) */
+function dev(b) {
+  if (b.op === 'addTab') {
+    const g = [['점검사항', '기준', ...sheets['설비 일일점검'].grid[0].slice(2).slice(-2)], ...b.labels.map((l) => [l, '', '', ''])];
+    sheets[b.tab] = { grid: g, notes: g.map((r) => r.map(() => '')) };
+    return { ok: true };
+  }
+  const s = sheets[b.tab];
+  if (!s) throw new Error('탭 없음');
+  const { grid, notes } = s;
+  const labels = () => grid.map((r) => String(r[0]));
+  const hasC = /기준/.test(String(grid[0][1] ?? ''));
+  const W = width(grid);
+  if (b.op === 'addRow') {
+    const at = dc_findRow(labels(), '점검자');
+    const i = at < 0 ? grid.length : at;
+    const row = [b.label, ...(hasC ? [b.criteria ?? ''] : []), ...Array(W - 1 - (hasC ? 1 : 0)).fill('')];
+    grid.splice(i, 0, row);
+    notes.splice(i, 0, Array(W).fill(''));
+  } else if (b.op === 'removeRow') {
+    const i = dc_findRow(labels(), b.label);
+    if (i < 0) throw new Error('항목 없음');
+    grid.splice(i, 1);
+    notes.splice(i, 1);
+  } else if (b.op === 'log') {
+    return { ok: true, log: logRows };
+  } else if (b.op === 'setCell') {
+    const i = dc_findRow(labels(), b.label);
+    const loc = dc_locate(grid, b.date, fmt, YEAR);
+    if (i < 0 || loc.col === null) throw new Error('칸 없음');
+    grid[i][loc.col] = b.value; // 시트에서 직접 수정한 상황
+  } else if (b.op === 'rename') {
+    const i = dc_findRow(labels(), b.from);
+    if (i < 0) throw new Error('항목 없음');
+    grid[i][0] = b.to;
+  } else if (b.op === 'criteria') {
+    const i = dc_findRow(labels(), b.label);
+    if (i < 0 || !hasC) throw new Error('항목 없음 또는 기준 열 없음');
+    grid[i][1] = b.value;
+  } else throw new Error('알 수 없는 op');
+  return { ok: true };
 }
 
 const photoDir = path.join(dir, 'photos');
@@ -82,7 +161,9 @@ function submit(b) {
   }
   const labels = grid.map((r) => String(r[0]));
   const missing = [];
+  const locked = [];
   let uploaded = [];
+  const at = stamp();
   const entries = [...(b.entries || []), { label: '점검자', value: b.inspector || '' }, { label: '점검시각', value: b.time || '' }];
   for (const en of entries) {
     const r = dc_findRow(labels, en.label);
@@ -90,7 +171,20 @@ function submit(b) {
       missing.push(en.label);
       continue;
     }
-    grid[r][col] = en.value ?? '';
+    const cur = grid[r][col] ?? '';
+    const val = en.value ?? '';
+    if (en.label === '점검자') {
+      if (val !== '' && cur === '') grid[r][col] = val;
+      else if (val !== '' && !String(cur).includes(String(val))) grid[r][col] = cur + ', ' + val;
+    } else if (en.label === '점검시각') {
+      if (val !== '' && cur === '') grid[r][col] = val;
+    } else {
+      const d = dc_decide(cur, val);
+      if (d === 'write') {
+        grid[r][col] = val;
+        logRows.push([at, '입력', b.tab, b.date, en.label, val, '', '', b.inspector || '']);
+      } else if (d === 'locked') locked.push(en.label);
+    }
     if (en.photos?.length) {
       const saved = en.photos.map((p) => {
         const name = `${b.date}_${p.id.slice(0, 6)}.jpg`;
@@ -102,7 +196,7 @@ function submit(b) {
       notes[r][col] = notes[r][col] ? notes[r][col] + '\n' + urls : '📷 사진\n' + urls;
     }
   }
-  return { ok: true, column: col + 1, missing, photos: uploaded };
+  return { ok: true, column: col + 1, missing, photos: uploaded, locked };
 }
 
 function html() {
@@ -136,11 +230,17 @@ http
       try {
         const b = JSON.parse(body);
         if (TOKEN && b.token !== TOKEN) throw new Error('비밀번호가 맞지 않습니다');
-        out = b.action === 'read' ? read() : b.action === 'submit' ? submit(b) : { ok: false, error: '알 수 없는 요청' };
+        out =
+          b.action === 'read' ? read()
+          : b.action === 'submit' ? submit(b)
+          : b.action === 'approve' ? approve(b)
+          : b.action === 'correct' ? correct(b)
+          : b.action === '_dev' ? dev(b)
+          : { ok: false, error: '알 수 없는 요청' };
       } catch (e) {
         out = { ok: false, error: String(e.message || e) };
       }
       res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' }).end(JSON.stringify(out));
     });
   })
-  .listen(PORT, () => console.log(`가짜 시트 서버: http://localhost:${PORT}  (비밀번호 ${TOKEN})`));
+  .listen(PORT, () => console.log(`가짜 시트 서버: http://localhost:${PORT}  (비밀번호 ${TOKEN}, 승인 비밀번호 ${PIN || '없음'})`));

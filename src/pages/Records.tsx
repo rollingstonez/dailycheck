@@ -79,7 +79,7 @@ export function exportRecordsCsv(recs: InspectionRecord[], filename: string) {
       }
     }
   }
-  const header = ['날짜', '점검표', '점검자', '이상 건수', '이상 항목', ...cols.map((c) => (c.unit ? `${c.label}(${c.unit})` : c.label))];
+  const header = ['날짜', '점검표', '점검자', '이상 건수', '이상 항목', '정정 내역', ...cols.map((c) => (c.unit ? `${c.label}(${c.unit})` : c.label))];
   const rows = [...recs]
     .sort((a, b) => a.date.localeCompare(b.date))
     .map((r) => {
@@ -90,6 +90,9 @@ export function exportRecordsCsv(recs: InspectionRecord[], filename: string) {
         r.inspector,
         r.abnormal.length,
         r.abnormal.map((id) => byId[id]?.label ?? '').join(' / '),
+        (r.corrections ?? [])
+          .map((c) => `${byId[c.itemId]?.label ?? ''}: ${c.from}→${c.to} (${c.reason}, ${c.by} ${c.at})`)
+          .join(' / '),
         ...cols.map((c) => {
           const v = r.values[c.id];
           if (c.type === 'number') return typeof v === 'number' ? v : '';

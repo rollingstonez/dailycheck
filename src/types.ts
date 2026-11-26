@@ -49,6 +49,17 @@ export interface Checklist {
 /** 항목별 입력값. 사진은 photos 표의 id 목록으로 저장 */
 export type ItemValue = 'yes' | 'no' | number | string | string[] | null;
 
+/** 정정 내역: 원본값은 지워지지 않고 여기와 시트 장부에 남는다 */
+export interface Correction {
+  itemId: string;
+  from: ItemValue;
+  to: ItemValue;
+  reason: string;
+  by: string;
+  /** yyyy-MM-dd HH:mm */
+  at: string;
+}
+
 export interface InspectionRecord {
   id: string;
   checklistId: string;
@@ -69,6 +80,8 @@ export interface InspectionRecord {
   photos?: Record<string, string[]>;
   /** 시트에 올라간 사진 링크 (항목별) */
   photoLinks?: Record<string, string[]>;
+  /** 정정 내역 (원본 → 정정값, 사유) */
+  corrections?: Correction[];
   /** 구글 시트에 반영 여부 (시트 연결이 없는 점검표는 항상 false) */
   synced: boolean;
   /** 마지막 동기화 실패 사유 */

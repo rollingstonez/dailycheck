@@ -36,10 +36,3 @@ export async function seedIfEmpty() {
     updatedAt: now,
   });
 }
-
-export async function deleteRecord(id: string) {
-  await db.transaction('rw', db.records, db.photos, async () => {
-    await db.photos.where('recordId').equals(id).delete();
-    await db.records.delete(id);
-  });
-}

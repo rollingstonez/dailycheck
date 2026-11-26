@@ -3,6 +3,7 @@ import { db } from '../db';
 import { go } from '../App';
 import { prettyDate, today } from '../util';
 import { getConfig, syncNow, useSyncState } from '../sheet/sync';
+import { countChanges } from '../sheet/changes';
 
 export default function Home() {
   const d = today();
@@ -48,6 +49,16 @@ export default function Home() {
             <div className="muted small">시트에 적은 점검사항으로 입력 화면이 만들어지고, 입력하면 시트에 자동 기록됩니다</div>
           </div>
           ›
+        </button>
+      )}
+
+      {cfg && countChanges(sync.changes) > 0 && (
+        <button className="card list-card alert" onClick={() => go('changes')}>
+          <div className="grow">
+            <div className="title">⚠ 시트의 점검항목이 바뀌었습니다</div>
+            <div className="muted small">변경 {countChanges(sync.changes)}건 · 확인하고 승인하면 화면에 반영됩니다</div>
+          </div>
+          <span className="badge todo">확인 ›</span>
         </button>
       )}
 

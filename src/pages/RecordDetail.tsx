@@ -1,5 +1,5 @@
 import { useLiveQuery } from 'dexie-react-hooks';
-import { db, deleteRecord } from '../db';
+import { db } from '../db';
 import { go } from '../App';
 import { criteriaText, formatValue, prettyDate } from '../util';
 import PhotoThumb from '../components/PhotoThumb';
@@ -8,12 +8,6 @@ export default function RecordDetail({ id }: { id: string }) {
   const r = useLiveQuery(() => db.records.get(id).then((x) => x ?? null), [id]);
   if (r === undefined) return null;
   if (r === null) return <div className="page">기록을 찾을 수 없습니다. <a href="#/records">목록으로</a></div>;
-
-  async function del() {
-    if (!confirm(r!.checklistId.startsWith('sheet:') ? '이 기기에서 기록을 지울까요?\n구글 시트의 값은 그대로 남으며, 다음 동기화 때 다시 받아옵니다.' : '이 기록을 삭제할까요? 되돌릴 수 없습니다.')) return;
-    await deleteRecord(id);
-    go('records');
-  }
 
   return (
     <div className="page">
@@ -33,7 +27,7 @@ export default function RecordDetail({ id }: { id: string }) {
           const v = r.values[item.id];
           const bad = r.abnormal.includes(item.id);
           return (
-            <div key={item.id} className={'kv ' + (bad ? 'is-bad' : '')}>
+            <div key={item.id} className={'kv wrapk ' + (bad ? 'is-bad' : '')}>
               <div className="grow">
                 <div>{item.label}</div>
                 {criteriaText(item) && <div className="muted small">{criteriaText(item)}</div>}
@@ -48,15 +42,20 @@ export default function RecordDetail({ id }: { id: string }) {
                 ))}
                 {bad && ' ⚠'}
               </div>
+              {(r.corrections ?? []).filter((c) => c.itemId === item.id).map((c, i) => (
+                <div key={i} className="ri-corr kv-corr">
+                  ✎ 정정 {formatValue(item, c.from) || '—'} → <b>{formatValue(item, c.to)}</b> · 사유: {c.reason} · {c.by} · {c.at}
+                </div>
+              ))}
             </div>
           );
         })}
       </div>
 
-      <div className="row-btns">
-        <button className="btn" onClick={() => go('inspect', r.checklistId, r.id)}>수정</button>
-        <button className="btn danger" onClick={del}>삭제</button>
+      <div className="card notice small">
+        🔒 저장된 기록은 지우거나 덮어쓸 수 없습니다. 값을 고치려면 사유를 남기는 <b>정정</b>을 하세요. 원본 값은 {r.checklistId.startsWith('sheet:') ? '시트의 숨김 탭 «_기록»' : '정정 내역'}에 남습니다.
       </div>
+      <button className="btn" onClick={() => go('inspect', r.checklistId, r.id)}>정정 · 보완 입력</button>
     </div>
   );
 }

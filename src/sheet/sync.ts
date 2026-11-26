@@ -1,8 +1,9 @@
 import { useSyncExternalStore } from 'react';
 import { db } from '../db';
-import type { Checklist, InspectionRecord, ItemValue } from '../types';
+import type { Checklist, Correction, InspectionRecord, ItemValue } from '../types';
 import { isAbnormal } from '../util';
 import { toCheckItem, type SheetTab } from './parse';
+import { resolve, type ApprovedTab, type TabChange } from './changes';
 
 /* ───── 연결 설정 (이 기기에 저장) ───── */
 
@@ -34,8 +35,29 @@ interface SyncState {
   error?: string;
   lastSync?: number;
   message?: string;
+  /** 시트에서 바뀌었지만 아직 승인하지 않은 점검항목 */
+  changes: TabChange[];
+  /** 승인에 비밀번호가 필요한지 (시트 스크립트의 ADMIN_PIN) */
+  pinRequired: boolean;
 }
-let state: SyncState = { busy: false, lastSync: Number(localStorage.getItem(LAST_KEY)) || undefined };
+interface SheetCorrection {
+  at: string;
+  tab: string;
+  date: string;
+  label: string;
+  from: string;
+  to: string;
+  reason: string;
+  by: string;
+}
+interface ReadResult {
+  name: string;
+  tabs: SheetTab[];
+  approved?: ApprovedTab[];
+  pinRequired?: boolean;
+  corrections?: SheetCorrection[];
+}
+let state: SyncState = { busy: false, lastSync: Number(localStorage.getItem(LAST_KEY)) || undefined, changes: [], pinRequired: false };
 const listeners = new Set<() => void>();
 function emit(p: Partial<SyncState>) {
   state = { ...state, ...p };
@@ -79,9 +101,9 @@ async function call<T>(cfg: SheetConfig, body: object): Promise<T> {
 /** 연결 테스트 + 저장 */
 export async function connect(url: string, token: string) {
   const cfg = { url: url.trim(), token: token.trim() };
-  const r = await call<{ name: string; tabs: SheetTab[] }>(cfg, { action: 'read' });
+  const r = await call<ReadResult>(cfg, { action: 'read' });
   setConfig({ ...cfg, name: r.name });
-  await applyRead(r.tabs);
+  await handleRead(r);
   emit({ lastSync: Date.now(), error: undefined });
   localStorage.setItem(LAST_KEY, String(Date.now()));
   return r;
@@ -96,7 +118,34 @@ export async function disconnect() {
 export const sheetChecklistId = (tab: string) => `sheet:${tab}`;
 export const sheetRecordId = (checklistId: string, date: string) => `${checklistId}|${date}`;
 
-async function applyRead(tabs: SheetTab[]) {
+/** 정정 내역의 값은 글자로 저장되어 있어, 숫자 항목이면 숫자로 되돌린다 */
+const castValue = (type: string, v: string): ItemValue => (type === 'number' && v.trim() !== '' && !isNaN(Number(v)) ? Number(v) : v);
+
+/** 시트에서 읽은 내용 → 승인된 항목으로 화면 구성, 승인 안 된 변경은 따로 모아 둔다 */
+async function handleRead(r: ReadResult) {
+  if (!r.approved) {
+    // 승인 기능이 없는 예전 스크립트: 시트 그대로 반영
+    await applyRead(r.tabs, r.corrections);
+    emit({ changes: [], pinRequired: false });
+    return;
+  }
+  const { effective, changes } = resolve(r.tabs, r.approved);
+  await applyRead(effective, r.corrections);
+  emit({ changes, pinRequired: !!r.pinRequired });
+}
+
+/** 변경 승인: 지금 시트의 모양을 확정본으로 저장 → 다시 동기화해서 모든 화면에 반영 */
+export async function approveChanges(pin: string) {
+  const cfg = getConfig();
+  if (!cfg) throw new Error('구글 시트가 연결되어 있지 않습니다');
+  const tabs = state.changes.filter((c) => !c.removedTab).map((c) => ({ tab: c.tab, items: c.liveItems }));
+  const removed = state.changes.filter((c) => c.removedTab).map((c) => c.tab);
+  await call(cfg, { action: 'approve', pin, tabs, removed });
+  if (running) await running;
+  await syncNow();
+}
+
+async function applyRead(tabs: SheetTab[], corrections: SheetCorrection[] = []) {
   const now = Date.now();
   const keepIds = new Set<string>();
   await db.transaction('rw', db.checklists, db.records, async () => {
@@ -131,6 +180,12 @@ async function applyRead(tabs: SheetTab[]) {
         });
         if (!any && !t.inspector[date]) continue;
         const p = prev.get(date);
+        const corr: Correction[] = corrections
+          .filter((c) => c.tab === t.tab && c.date === date)
+          .flatMap((c) => {
+            const it = items.find((x) => x.sheetLabel === c.label);
+            return it ? [{ itemId: it.id, from: castValue(it.type, c.from), to: castValue(it.type, c.to), reason: c.reason, by: c.by, at: c.at }] : [];
+          });
         recs.push({
           id: sheetRecordId(id, date),
           checklistId: id,
@@ -143,6 +198,7 @@ async function applyRead(tabs: SheetTab[]) {
           itemsSnapshot: items,
           photos: p?.photos,
           photoLinks,
+          corrections: corr.length ? corr : undefined,
           createdAt: p?.createdAt ?? now,
           updatedAt: now,
           synced: true,
@@ -183,7 +239,7 @@ async function pushRecord(cfg: SheetConfig, rec: InspectionRecord, tab: string) 
     }
     entries.push({ label: it.sheetLabel, value: v === undefined || v === null ? '' : v, photos });
   }
-  const r = await call<{ missing: string[]; photos: { id: string; url: string }[] }>(cfg, {
+  const r = await call<{ missing: string[]; photos: { id: string; url: string }[]; locked?: string[] }>(cfg, {
     action: 'submit',
     tab,
     date: rec.date,
@@ -196,6 +252,14 @@ async function pushRecord(cfg: SheetConfig, rec: InspectionRecord, tab: string) 
     synced: true,
     syncError: r.missing.length ? `시트에 없는 항목: ${r.missing.join(', ')}` : undefined,
   });
+  return r.locked ?? [];
+}
+
+/** 정정 요청 (시트 스크립트가 사유·승인 비밀번호를 확인하고 장부에 남긴다) */
+export async function sheetCorrect(p: { tab: string; date: string; label: string; value: ItemValue; reason: string; inspector: string; pin: string }) {
+  const cfg = getConfig();
+  if (!cfg) throw new Error('구글 시트가 연결되어 있지 않습니다');
+  await call(cfg, { action: 'correct', ...p });
 }
 
 /* ───── 동기화 (보내기 → 받기) ───── */
@@ -213,21 +277,23 @@ export function syncNow(): Promise<void> {
       const tabOf = new Map(lists.map((c) => [c.id, c.sheetTab!]));
       const pending = await db.records.filter((r) => !r.synced && tabOf.has(r.checklistId)).toArray();
       let sent = 0;
+      const skipped: string[] = [];
       for (const rec of pending) {
         try {
-          await pushRecord(cfg, rec, tabOf.get(rec.checklistId)!);
+          skipped.push(...(await pushRecord(cfg, rec, tabOf.get(rec.checklistId)!)));
           sent++;
         } catch (e) {
           await db.records.update(rec.id, { syncError: (e as Error).message });
           throw e;
         }
       }
-      const r = await call<{ name: string; tabs: SheetTab[] }>(cfg, { action: 'read' });
+      const r = await call<ReadResult>(cfg, { action: 'read' });
       if (r.name !== cfg.name) setConfig({ ...cfg, name: r.name });
-      await applyRead(r.tabs);
+      await handleRead(r);
       const t = Date.now();
       localStorage.setItem(LAST_KEY, String(t));
-      emit({ lastSync: t, message: sent ? `시트에 ${sent}건 기록했습니다` : undefined });
+      const msg = [sent ? `시트에 ${sent}건 기록했습니다` : '', skipped.length ? `이미 기록된 칸은 그대로 두었습니다: ${[...new Set(skipped)].join(', ')}` : ''].filter(Boolean).join(' · ');
+      emit({ lastSync: t, message: msg || undefined });
     } catch (e) {
       emit({ error: (e as Error).message });
     } finally {

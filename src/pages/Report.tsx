@@ -117,6 +117,7 @@ function ReportBody({ mode, title, name, currentItems, recs, days, start }: Body
   for (const e of abnormalEvents) abnormalByItem.set(e.item.id, (abnormalByItem.get(e.item.id) ?? 0) + 1);
   const topBad = [...abnormalByItem.entries()].sort((a, b) => b[1] - a[1]).slice(0, 3);
   const inspectors = [...new Set(recs.map((r) => r.inspector).filter(Boolean))];
+  const correctionCount = recs.reduce((n, r) => n + (r.corrections?.length ?? 0), 0);
 
   const summary: string[] = [];
   if (recs.length === 0) summary.push('이 기간에는 점검 기록이 없습니다.');
@@ -139,6 +140,8 @@ function ReportBody({ mode, title, name, currentItems, recs, days, start }: Body
       }
     }
   }
+
+  if (correctionCount > 0) summary.push(`정정 ${correctionCount}건 (✎ 표시). 원본 값과 사유는 기록에 남아 있습니다.`);
 
   const lead = mode === 'month' ? (start.getDay() + 6) % 7 : 0;
 
@@ -284,7 +287,7 @@ function ItemSummary({ item, recs, days, bad }: { item: CheckItem; recs: Inspect
                   <tr key={r.id} className={r.abnormal.includes(item.id) ? 'bad-text' : ''}>
                     <td>{Number(r.date.slice(5, 7))}/{Number(r.date.slice(8))}</td>
                     <td>{r.inspector}</td>
-                    <td>{formatValue(item, r.values[item.id])}{r.abnormal.includes(item.id) ? ' ⚠' : ''}</td>
+                    <td>{formatValue(item, r.values[item.id])}{r.abnormal.includes(item.id) ? ' ⚠' : ''}{r.corrections?.some((c) => c.itemId === item.id) ? ' ✎' : ''}</td>
                   </tr>
                 ))}
               </tbody>
