@@ -1,4 +1,4 @@
-// 데이터 구조는 나중에 Supabase 표로 그대로 옮길 수 있도록 단순하게 유지한다.
+// 데이터 구조는 구글 시트 한 칸·한 줄에 그대로 옮겨 쓸 수 있도록 단순하게 유지한다.
 
 export type ItemType = 'yesno' | 'number' | 'choice' | 'memo' | 'photo';
 
