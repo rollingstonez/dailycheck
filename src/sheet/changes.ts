@@ -1,4 +1,5 @@
 import type { SheetItem, SheetTab } from './parse';
+import { nowYM, parseTab, seriesOf, tabYM } from './series';
 
 /**
  * 시트의 점검항목 변경 확인.
@@ -27,6 +28,10 @@ export interface TabChange {
   newTab?: boolean;
   /** 시트에서 사라진 탭 */
   removedTab?: boolean;
+  /** 새 달 탭이면 비교 기준이 된 지난달 탭 (changes 는 지난달 대비 달라진 점) */
+  basedOn?: string;
+  /** 지난달과 똑같은 새 달 탭: 바뀐 것이 없으니 자동으로 확정한다 */
+  autoApprove?: boolean;
   changes: Change[];
   /** 승인하면 확정본이 될 목록 (지금 시트의 모양) */
   liveItems: ApprovedItem[];
@@ -86,13 +91,33 @@ export function resolve(tabs: SheetTab[], approved: ApprovedTab[]) {
   const apMap = new Map(approved.map((a) => [a.tab, a.items]));
   const effective: SheetTab[] = [];
   const changes: TabChange[] = [];
+  const { y: ny, m: nm } = nowYM();
+  const ymOfName = (name: string) => tabYM(parseTab(name), ny, nm);
+
+  /** 같은 점검표(이름이 같은 월별 탭)에서 이 탭보다 앞선, 확정된 가장 최근 탭 */
+  const previousApproved = (tab: string, ym: string) => {
+    const same = approved.filter((a) => a.tab !== tab && seriesOf(a.tab) === seriesOf(tab) && a.items.length);
+    const byYm = (a: ApprovedTab, b: ApprovedTab) => ymOfName(a.tab).localeCompare(ymOfName(b.tab));
+    const before = same.filter((a) => ymOfName(a.tab) && ymOfName(a.tab) < ym).sort(byYm);
+    const any = [...same].sort(byYm); // 더 앞선 달이 없으면 같은 점검표의 가장 최근 탭을 기준으로
+    return before.length ? before[before.length - 1] : any[any.length - 1];
+  };
 
   for (const t of tabs) {
+    if (t.lite) continue; // 오래된 월별 탭은 이름만 받았으므로 비교하지 않음
     const ap = apMap.get(t.tab);
     if (!t.items.length && !ap) continue; // 항목이 없는 탭은 무시
     const liveItems = t.items.map((i) => ({ label: norm(i.label), criteria: norm(i.criteria) }));
     if (!ap) {
-      changes.push({ tab: t.tab, newTab: true, changes: liveItems.map((i) => ({ kind: 'add', label: i.label, criteria: i.criteria })), liveItems });
+      const ym = t.ym ?? ymOfName(t.tab);
+      const prev = ym ? previousApproved(t.tab, ym) : undefined;
+      if (prev) {
+        // 새 달 탭: 지난달 대비 달라진 점만 보여 준다. 똑같으면 자동 확정.
+        const diff = diffTab(prev.items, t.items);
+        changes.push({ tab: t.tab, newTab: true, basedOn: prev.tab, autoApprove: diff.length === 0, changes: diff, liveItems });
+      } else {
+        changes.push({ tab: t.tab, newTab: true, changes: liveItems.map((i) => ({ kind: 'add', label: i.label, criteria: i.criteria })), liveItems });
+      }
       continue;
     }
     const diff = diffTab(ap, t.items);
@@ -104,4 +129,5 @@ export function resolve(tabs: SheetTab[], approved: ApprovedTab[]) {
   return { effective, changes };
 }
 
-export const countChanges = (cs: TabChange[]) => cs.reduce((n, c) => n + (c.newTab || c.removedTab ? 1 : c.changes.length), 0);
+export const countChanges = (cs: TabChange[]) =>
+  cs.reduce((n, c) => n + (c.removedTab || (c.newTab && !c.basedOn) ? 1 : c.newTab ? Math.max(1, c.changes.length) : c.changes.length), 0);

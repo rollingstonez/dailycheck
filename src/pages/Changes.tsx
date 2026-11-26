@@ -59,7 +59,12 @@ export default function Changes() {
           {s.changes.map((tc) => (
             <div key={tc.tab} className="card">
               <h3>{tc.tab}</h3>
-              {tc.newTab && <div className="muted small">시트에 새 탭이 생겼습니다. 항목 {tc.liveItems.length}개의 새 점검표로 추가됩니다.</div>}
+              {tc.newTab && !tc.basedOn && <div className="muted small">시트에 새 탭이 생겼습니다. 항목 {tc.liveItems.length}개의 새 점검표로 추가됩니다.</div>}
+              {tc.newTab && tc.basedOn && (
+                <div className="muted small">
+                  새 달 탭입니다. 지난달(«{tc.basedOn}») 점검표를 이어받고, {tc.changes.length ? '달라진 점만 아래에 표시합니다.' : '바뀐 점은 없습니다. 승인하면 이어집니다.'}
+                </div>
+              )}
               {tc.removedTab && <div className="muted small">시트에서 이 탭이 사라졌습니다. 승인하면 점검표 목록에서 지웁니다. (이 기기에 받아 둔 기록은 남습니다)</div>}
               <ul className="chg-list">{tc.changes.map((c, i) => <ChangeLine key={i} c={c} />)}</ul>
             </div>

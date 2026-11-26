@@ -11,7 +11,7 @@ import { fileURLToPath } from 'node:url';
 const dir = path.dirname(fileURLToPath(import.meta.url));
 const ctx = vm.createContext({});
 vm.runInContext(fs.readFileSync(path.join(dir, '../apps-script/Code.gs'), 'utf8'), ctx);
-const { dc_read, dc_locate, dc_findRow, dc_initApproved, dc_groupApproved, dc_applyApproval, dc_decide, dc_groupCorrections, dc_verify, dc_expectedMap, dc_findFinding, dc_acceptRows, dc_cast, dc_hasCriteria, dc_SEP, TOKEN } = ctx;
+const { dc_read, dc_locate, dc_findRow, dc_initApproved, dc_groupApproved, dc_applyApproval, dc_decide, dc_groupCorrections, dc_verify, dc_expectedMap, dc_findFinding, dc_acceptRows, dc_cast, dc_hasCriteria, dc_SEP, dc_parseTab, dc_tabYM, dc_recentFrom, dc_copyApproved, dc_sameStructure, TOKEN } = ctx;
 // 승인 비밀번호: 개발용 기본값 0000 (승인 비밀번호 입력 흐름을 시험하려고). 비우려면  ADMIN_PIN= npm run mock
 const PIN = process.env.ADMIN_PIN ?? '0000';
 const PORT = Number(process.env.PORT || 8787);
@@ -48,6 +48,21 @@ function seed() {
   // 기준 열 없는 시트 (사용자가 처음 보여 준 모양 그대로)
   const g2 = [['점검사항', ...days.slice(-3)], ['밸브', 'on', 'off', 'on'], ['오일 (ml)', 120, 130, 115], ['헬륨(Kg)', 45, 42, 39], ['온도(oC)', 85, 86, 91]];
   sheets['보일러실'] = { grid: g2, notes: g2.map((r) => r.map(() => '')) };
+
+  // 월별 탭 («라인점검 2026-07» … 이번 달): 한 탭 = 한 달. 5개월 전·4개월 전 탭은 «오래된 탭»(동기화 때 이름만 읽음)
+  const now = new Date();
+  for (let k = 4; k >= 0; k--) {
+    const first = new Date(now.getFullYear(), now.getMonth() - k, 1);
+    const last = k === 0 ? now.getDate() : new Date(first.getFullYear(), first.getMonth() + 1, 0).getDate();
+    const ds = [];
+    for (let d = 1; d <= Math.min(last, 6); d++) ds.push(new Date(first.getFullYear(), first.getMonth(), d));
+    const g = [['점검사항', '기준', ...ds]];
+    g.push(['라인 압력 (bar)', '3~5', ...ds.map((_, i) => +(4 + (i % 3) * 0.3 - (k === 2 && i === 3 ? 1.5 : 0)).toFixed(1))]);
+    g.push(['컨베이어', 'on/off', ...ds.map(() => 'on')]);
+    g.push(['점검자', '', ...ds.map(() => '박현장')]);
+    g.push(['점검시각', '', ...ds.map(() => '09:00')]);
+    sheets[`라인점검 ${first.getFullYear()}-${pad(first.getMonth() + 1)}`] = { grid: g, notes: g.map((r) => r.map(() => '')) };
+  }
 }
 seed();
 
@@ -59,24 +74,43 @@ const logRows = [];
 const corrRows = [];
 const stamp = () => new Date().toISOString().slice(0, 16).replace('T', ' ');
 
-const readTabs = () => Object.entries(sheets).map(([tab, s]) => ({ tab, ...dc_read(s.grid, s.notes, fmt, YEAR) }));
+const nowY = new Date().getFullYear();
+const nowM = new Date().getMonth() + 1;
+/** recentFrom 보다 오래된 월별 탭은 이름만(lite) — Code.gs 의 readTabs_ 와 같은 규칙 */
+const readTabs = (recentFrom = null) =>
+  Object.entries(sheets).map(([tab, s]) => {
+    const ym = dc_tabYM(dc_parseTab(tab), nowY, nowM);
+    if (recentFrom && ym && ym < recentFrom) return { tab, lite: true, ym };
+    return { tab, ...dc_read(s.grid, s.notes, fmt, YEAR), ym };
+  });
 
-function read() {
-  const tabs = readTabs();
+function read(b) {
+  const first = !approvedRows; // 처음 연결할 때는 전체를 읽어 확정본을 만든다
+  const tabs = readTabs(first ? null : b?.recent || null);
   if (!approvedRows) approvedRows = dc_initApproved(tabs, stamp());
   return { ok: true, name: '가짜 시트 (개발용)', tabs, approved: dc_groupApproved(approvedRows), pinRequired: !!PIN, corrections: dc_groupCorrections(corrRows) };
 }
 
 function approve(b) {
-  if (PIN && String(b.pin || '') !== PIN) throw new Error('승인 비밀번호가 맞지 않습니다');
+  const auto = b.auto === true; // 이미 확정된 다른 탭과 똑같은 새 달 탭만 비밀번호 없이
+  if (!auto && PIN && String(b.pin || '') !== PIN) throw new Error('승인 비밀번호가 맞지 않습니다');
   if (!approvedRows) throw new Error('먼저 앱에서 동기화하세요');
+  if (auto) for (const t of b.tabs || []) if (!dc_sameStructure(approvedRows, t.tab, t.items)) throw new Error('자동으로 확정할 수 없는 변경입니다');
   approvedRows = dc_applyApproval(approvedRows, b.tabs || [], b.removed || [], stamp());
   return { ok: true };
 }
 
 /** 기록 검사 (Code.gs 의 verify_ / resolve_ / restoreFinding_ 와 같은 규칙) */
-function verify() {
-  const r = dc_verify(readTabs(), logRows);
+function verifyTabs(all) {
+  const tabs = readTabs(all ? null : dc_recentFrom(nowY, nowM));
+  const skip = {};
+  for (const t of tabs) if (t.lite) skip[t.tab] = true;
+  return { tabs: tabs.filter((t) => !t.lite), skip };
+}
+
+function verify(b) {
+  const vt = verifyTabs(!!b?.all);
+  const r = dc_verify(vt.tabs, logRows, vt.skip);
   return { ok: true, at: stamp(), checked: r.checked, findings: r.findings };
 }
 
@@ -133,7 +167,8 @@ function resolve(b) {
   let reason = String(b.reason || '').trim();
   if (mode === 'accept' && !reason) throw new Error('인정 사유를 입력하세요');
   if (!reason) reason = '시트에서 직접 바뀐 값을 장부의 값으로 되돌림';
-  const current = dc_verify(readTabs(), logRows).findings;
+  const vt = verifyTabs(!!b.all);
+  const current = dc_verify(vt.tabs, logRows, vt.skip).findings;
   const at = stamp();
   const by = b.inspector || '';
   const out = [];
@@ -177,6 +212,18 @@ function correct(b) {
 
 /** 개발용: 누군가 시트에서 항목을 고치는 상황을 흉내 낸다 (실제 스크립트에는 없음) */
 function dev(b) {
+  if (b.op === 'removeTab') {
+    delete sheets[b.tab];
+    return { ok: true };
+  }
+  if (b.op === 'copyTab') {
+    // 손으로 탭을 복사해 새 달 탭을 만든 상황: 점검사항·기준은 그대로, 값은 비움
+    const src = sheets[b.from];
+    const start = dc_hasCriteria(src.grid[0]) ? 2 : 1;
+    const grid = src.grid.map((r) => r.slice(0, start));
+    sheets[b.tab] = { grid, notes: grid.map((r) => r.map(() => '')) };
+    return { ok: true };
+  }
   if (b.op === 'addTab') {
     const g = [['점검사항', '기준', ...sheets['설비 일일점검'].grid[0].slice(2).slice(-2)], ...b.labels.map((l) => [l, '', '', ''])];
     sheets[b.tab] = { grid: g, notes: g.map((r) => r.map(() => '')) };
@@ -226,7 +273,18 @@ function dev(b) {
 const photoDir = path.join(dir, 'photos');
 fs.mkdirSync(photoDir, { recursive: true });
 
+/** 새 달 탭: 지난달 탭의 점검사항·기준만 복사 (Code.gs 의 createMonthTab_ 와 같은 규칙) */
+function createMonthTab(from, name) {
+  const src = sheets[from];
+  if (!src) throw new Error(`새 달 탭을 만들 기준 탭 "${from}" 이 없습니다`);
+  const start = dc_hasCriteria(src.grid[0]) ? 2 : 1;
+  const grid = src.grid.map((r, i) => (i === 0 ? r.slice(0, start) : [...r.slice(0, start)]));
+  sheets[name] = { grid, notes: grid.map((r) => r.map(() => '')) };
+  if (approvedRows) approvedRows = dc_copyApproved(approvedRows, from, name, stamp());
+}
+
 function submit(b) {
+  if (!sheets[b.tab] && b.createFrom) createMonthTab(b.createFrom, b.tab);
   const s = sheets[b.tab];
   if (!s) throw new Error(`시트에 "${b.tab}" 탭이 없습니다`);
   const { grid, notes } = s;
@@ -282,7 +340,7 @@ function submit(b) {
       notes[r][col] = notes[r][col] ? notes[r][col] + '\n' + urls : '📷 사진\n' + urls;
     }
   }
-  return { ok: true, column: col + 1, missing, photos: uploaded, locked };
+  return { ok: true, tab: b.tab, column: col + 1, missing, photos: uploaded, locked };
 }
 
 function html() {
@@ -317,11 +375,12 @@ http
         const b = JSON.parse(body);
         if (TOKEN && b.token !== TOKEN) throw new Error('비밀번호가 맞지 않습니다');
         out =
-          b.action === 'read' ? read()
+          b.action === 'read' ? read(b)
           : b.action === 'submit' ? submit(b)
           : b.action === 'approve' ? approve(b)
           : b.action === 'correct' ? correct(b)
-          : b.action === 'verify' ? verify()
+          : b.action === 'verify' ? verify(b)
+          : b.action === 'readTabs' ? { ok: true, tabs: readTabs().filter((t) => (b.tabs || []).includes(t.tab)) }
           : b.action === 'resolve' ? resolve(b)
           : b.action === 'protect' ? { ok: true, mock: true }
           : b.action === '_dev' ? dev(b)

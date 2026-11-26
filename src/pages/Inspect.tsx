@@ -7,6 +7,7 @@ import { compressImage, criteriaText, formatValue, hhmm, isAbnormal, stampNow, t
 import PhotoThumb from '../components/PhotoThumb';
 import { sheetRecordId, syncNow, useSyncState } from '../sheet/sync';
 import { correctRecord } from '../correct';
+import { itemsForDate } from '../sheet/series';
 
 const INSPECTOR_KEY = 'dc:inspector';
 
@@ -66,7 +67,7 @@ export default function Inspect({ checklistId, recordId }: Props) {
   if (checklist === undefined || existing === undefined) return null;
   if (checklist === null) return <div className="page">점검표를 찾을 수 없습니다.</div>;
 
-  const items = checklist.items;
+  const items = itemsForDate(checklist, date);
   const recVals = existing?.values ?? {};
   /** 이미 저장된 값은 잠김 (고치려면 «정정») */
   const isLocked = (i: CheckItem) => i.type !== 'photo' && hasValue(recVals[i.id]);

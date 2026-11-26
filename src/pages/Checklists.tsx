@@ -39,7 +39,7 @@ export default function Checklists() {
           <div className="grow">
             <div className="title">{c.name}</div>
             <div className="muted">
-              {c.sheetTab ? '📄 구글 시트 탭 · ' : '이 기기에서 만든 점검표 · '}항목 {c.items.length}개
+              {c.monthly ? `📄 월별 탭 ${c.tabs?.length ?? 0}개 · ` : c.sheetTab ? '📄 구글 시트 탭 · ' : '이 기기에서 만든 점검표 · '}항목 {c.items.length}개
             </div>
           </div>
           <span className="muted">{c.sheetTab ? '보기 ›' : '편집 ›'}</span>

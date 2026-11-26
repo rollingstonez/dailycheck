@@ -5,6 +5,7 @@ import type { CheckItem, InspectionRecord } from '../types';
 import { criteriaText, fmtNum, formatValue, toDateStr, today } from '../util';
 import { exportRecordsCsv } from './Records';
 import { byOrder } from './Home';
+import { ensureRange, useSyncState } from '../sheet/sync';
 
 type Mode = 'week' | 'month';
 const WEEK = ['월', '화', '수', '목', '금', '토', '일'];
@@ -42,6 +43,11 @@ export default function Report() {
   }, [lists, listId]);
 
   const r = rangeOf(mode, anchor);
+  const sync = useSyncState();
+  // 오래된 월별 탭은 동기화 때 이름만 받으므로, 그 기간을 볼 때 내용을 불러온다
+  useEffect(() => {
+    if (listId) ensureRange(listId, r.from, r.to);
+  }, [listId, r.from, r.to]);
   const recs = useLiveQuery(
     () => (listId ? db.records.where('[checklistId+date]').between([listId, r.from], [listId, r.to], true, true).sortBy('date') : []),
     [listId, r.from, r.to],
@@ -82,6 +88,7 @@ export default function Report() {
         </label>
       </div>
 
+      {sync.loadingOld && <div className="card notice small no-print">지난 달 기록을 불러오는 중…</div>}
       {checklist && recs && (
         <ReportBody mode={mode} title={title} name={checklist.name} currentItems={checklist.items} recs={recs} days={r.days} start={r.start} />
       )}

@@ -2,6 +2,7 @@ import { db } from './db';
 import type { Correction, ItemValue } from './types';
 import { isAbnormal, toDateStr } from './util';
 import { sheetCorrect, syncNow } from './sheet/sync';
+import { tabForDate } from './sheet/series';
 
 const pad = (n: number) => String(n).padStart(2, '0');
 const nowStr = () => {
@@ -43,7 +44,7 @@ export async function correctRecord(o: CorrectOpts) {
       rec = await db.records.get(o.recordId);
       if (!rec?.synced) throw new Error('인터넷에 연결된 뒤에 정정할 수 있습니다 (먼저 시트로 보내야 합니다)');
     }
-    await sheetCorrect({ tab: cl.sheetTab, date: rec.date, label: item.sheetLabel ?? item.label, value: o.value, reason, inspector: o.inspector, pin: o.pin });
+    await sheetCorrect({ tab: rec.tab ?? tabForDate(cl, rec.date).tab, date: rec.date, label: item.sheetLabel ?? item.label, value: o.value, reason, inspector: o.inspector, pin: o.pin });
     await syncNow(); // 시트에서 다시 읽어 값·정정 내역 반영
     return;
   }

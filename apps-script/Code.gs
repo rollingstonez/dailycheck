@@ -37,11 +37,12 @@ function doPost(e) {
   try {
     var body = JSON.parse(e.postData.contents);
     if (TOKEN && body.token !== TOKEN) throw new Error('비밀번호가 맞지 않습니다');
-    if (body.action === 'read') return json_(read_());
+    if (body.action === 'read') return json_(read_(body));
+    if (body.action === 'readTabs') return json_(readTabsNamed_(body));
     if (body.action === 'submit') return json_(submit_(body));
     if (body.action === 'approve') return json_(approve_(body));
     if (body.action === 'correct') return json_(correct_(body));
-    if (body.action === 'verify') return json_(verify_());
+    if (body.action === 'verify') return json_(verify_(body));
     if (body.action === 'resolve') return json_(resolve_(body));
     if (body.action === 'protect') return json_(protect_());
     throw new Error('알 수 없는 요청: ' + body.action);
@@ -59,22 +60,42 @@ function fmt_() {
   return function (d) { return Utilities.formatDate(d, tz, 'yyyy-MM-dd'); };
 }
 
-function readTabs_(ss) {
+/**
+ * 시트의 탭들을 읽는다. recentFrom('yyyy-MM')을 주면 그보다 오래된 월별 탭은 이름만(lite) 돌려준다.
+ * (월별 탭이 해마다 쌓여도 동기화가 느려지지 않도록)
+ */
+function readTabs_(ss, recentFrom) {
   var fmt = fmt_();
   var year = new Date().getFullYear();
+  var now = new Date();
+  var ny = now.getFullYear(), nm = now.getMonth() + 1;
   return ss.getSheets()
     .filter(function (s) { return !s.isSheetHidden() && s.getName().charAt(0) !== '_'; })
     .map(function (sh) {
+      var name = sh.getName();
+      var ym = dc_tabYM(dc_parseTab(name), ny, nm);
+      if (recentFrom && ym && ym < recentFrom) return { tab: name, lite: true, ym: ym };
       var rng = sh.getDataRange();
       var r = dc_read(rng.getValues(), rng.getNotes(), fmt, year);
-      r.tab = sh.getName();
+      r.tab = name;
+      r.ym = ym;
       return r;
     });
 }
 
-function read_() {
+/** 지난 달 탭을 필요할 때 읽는다 (보고서·기록에서 오래된 달을 볼 때) */
+function readTabsNamed_(b) {
   var ss = SpreadsheetApp.getActive();
-  var tabs = readTabs_(ss);
+  var want = {};
+  (b.tabs || []).forEach(function (n) { want[n] = true; });
+  var tabs = readTabs_(ss, null).filter(function (t) { return want[t.tab]; });
+  return { ok: true, tabs: tabs };
+}
+
+function read_(b) {
+  var ss = SpreadsheetApp.getActive();
+  var firstTime = !ss.getSheetByName(APPROVED_TAB); // 처음 연결할 때는 전체를 읽어 확정본을 만든다
+  var tabs = readTabs_(ss, firstTime ? null : (b && b.recent) || null);
   return { ok: true, name: ss.getName(), tabs: tabs, approved: approved_(ss, tabs), pinRequired: !!ADMIN_PIN, corrections: readCorrections_(ss) };
 }
 
@@ -115,17 +136,42 @@ function approved_(ss, tabs) {
 }
 
 function approve_(b) {
-  if (ADMIN_PIN && String(b.pin || '') !== ADMIN_PIN) throw new Error('승인 비밀번호가 맞지 않습니다');
+  // auto: 새 달 탭이 이미 확정된 다른 탭과 똑같은 모양일 때만 비밀번호 없이 확정 (바뀐 것이 없으므로)
+  var auto = b.auto === true;
+  if (!auto && ADMIN_PIN && String(b.pin || '') !== ADMIN_PIN) throw new Error('승인 비밀번호가 맞지 않습니다');
   var lock = LockService.getDocumentLock();
   lock.waitLock(20000);
   try {
     var sh = SpreadsheetApp.getActive().getSheetByName(APPROVED_TAB);
     if (!sh) throw new Error('먼저 앱에서 동기화하세요');
-    writeApproved_(sh, dc_applyApproval(readApprovedRows_(sh), b.tabs || [], b.removed || [], stamp_()));
+    var rows = readApprovedRows_(sh);
+    if (auto) (b.tabs || []).forEach(function (t) { if (!dc_sameStructure(rows, t.tab, t.items)) throw new Error('자동으로 확정할 수 없는 변경입니다'); });
+    writeApproved_(sh, dc_applyApproval(rows, b.tabs || [], b.removed || [], stamp_()));
     return { ok: true };
   } finally {
     lock.releaseLock();
   }
+}
+
+/**
+ * 새 달 탭 만들기: 지난달 탭을 복사하고 날짜별 값(C열부터)만 비운다.
+ * 점검사항·기준·서식은 그대로 이어지고, 확정본(_승인본)도 지난달 것을 이어받아 다시 승인을 묻지 않는다.
+ */
+function createMonthTab_(ss, from, name) {
+  var src = ss.getSheetByName(from);
+  if (!src) throw new Error('새 달 탭을 만들 기준 탭 "' + from + '" 이 없습니다');
+  var sh = src.copyTo(ss);
+  sh.setName(name);
+  var head = src.getRange(1, 1, 1, Math.min(2, src.getMaxColumns())).getValues()[0];
+  var startCol = dc_hasCriteria(head) ? 3 : 2;
+  if (sh.getMaxColumns() >= startCol) {
+    sh.getRange(1, startCol, sh.getMaxRows(), sh.getMaxColumns() - startCol + 1).clearContent().clearNote();
+  }
+  try { ss.setActiveSheet(sh); ss.moveActiveSheet(src.getIndex() + 1); } catch (e) { /* 위치를 못 옮겨도 계속 */ }
+  var ap = ss.getSheetByName(APPROVED_TAB);
+  if (ap) writeApproved_(ap, dc_copyApproved(readApprovedRows_(ap), from, name, stamp_()));
+  try { ensureProtection_(sh); } catch (e) { /* 보호를 걸지 못해도 계속 */ }
+  return sh;
 }
 
 /** 숨김 탭을 만들거나 가져온다 */
@@ -190,7 +236,9 @@ function submit_(b) {
   var lock = LockService.getDocumentLock();
   lock.waitLock(20000); // 여러 명이 동시에 저장해도 섞이지 않도록
   try {
-    var sh = SpreadsheetApp.getActive().getSheetByName(b.tab);
+    var ss0 = SpreadsheetApp.getActive();
+    var sh = ss0.getSheetByName(b.tab);
+    if (!sh && b.createFrom) sh = createMonthTab_(ss0, b.createFrom, b.tab); // 새 달의 첫 입력: 지난달 탭을 복사해 새 탭을 만든다
     if (!sh) throw new Error('시트에 "' + b.tab + '" 탭이 없습니다');
     var fmt = fmt_();
     var grid = sh.getDataRange().getValues();
@@ -255,7 +303,7 @@ function submit_(b) {
     });
     appendRows_(hiddenSheet_(LOG_TAB, LOG_HEADER), logRows);
     try { ensureProtection_(sh); } catch (e) { /* 보호를 걸지 못해도 입력은 저장됨 */ }
-    return { ok: true, column: col + 1, missing: missing, photos: uploaded, locked: locked };
+    return { ok: true, tab: b.tab, column: col + 1, missing: missing, photos: uploaded, locked: locked };
   } finally {
     lock.releaseLock();
   }
@@ -321,10 +369,20 @@ function readLogRows_(sh) {
   return sh.getLastRow() > 1 ? sh.getRange(2, 1, sh.getLastRow() - 1, LOG_HEADER.length).getValues() : [];
 }
 
-function verify_() {
+/** 기본은 최근 3개월 탭만 검사 (all: true 면 전체 기간) */
+function verifyTabs_(ss, all) {
+  var d = new Date();
+  var tabs = readTabs_(ss, all ? null : dc_recentFrom(d.getFullYear(), d.getMonth() + 1));
+  var skip = {};
+  tabs.forEach(function (t) { if (t.lite) skip[t.tab] = true; });
+  return { tabs: tabs.filter(function (t) { return !t.lite; }), skip: skip };
+}
+
+function verify_(b) {
   var ss = SpreadsheetApp.getActive();
   var rows = readLogRows_(hiddenSheet_(LOG_TAB, LOG_HEADER));
-  var r = dc_verify(readTabs_(ss), rows);
+  var vt = verifyTabs_(ss, !!(b && b.all));
+  var r = dc_verify(vt.tabs, rows, vt.skip);
   return { ok: true, at: stamp_(), checked: r.checked, findings: r.findings };
 }
 
@@ -393,7 +451,8 @@ function resolve_(b) {
     var ss = SpreadsheetApp.getActive();
     var logSh = hiddenSheet_(LOG_TAB, LOG_HEADER);
     var rows = readLogRows_(logSh);
-    var current = dc_verify(readTabs_(ss), rows).findings;
+    var vt = verifyTabs_(ss, !!b.all);
+    var current = dc_verify(vt.tabs, rows, vt.skip).findings;
     var stamp = stamp_(), by = b.inspector || '';
     var out = [], done = 0, skipped = 0;
     (b.items || []).forEach(function (want) {
@@ -604,7 +663,7 @@ function dc_expectedMap(rows) {
  *   tabDeleted  : 탭이 지워짐
  * «직접수정 확인» 으로 인정된 것은 다시 나타나지 않는다.
  */
-function dc_verify(tabs, rows) {
+function dc_verify(tabs, rows, skip) {
   var exp = dc_expectedMap(rows);
   var ackRow = {}, ackDate = {}, ackTab = {}, logStart = {};
   rows.forEach(function (r) {
@@ -624,7 +683,7 @@ function dc_verify(tabs, rows) {
 
   Object.keys(exp).forEach(function (k) {
     var p = k.split(dc_SEP), tab = p[0], date = p[1], label = p[2], v = exp[k].v;
-    if (ackTab[tab]) return;
+    if (ackTab[tab] || (skip && skip[tab])) return; // 읽지 않은(오래된) 탭은 검사하지 않음
     var t = byTab[tab];
     if (!t) { tabGone[tab] = (tabGone[tab] || 0) + 1; return; }
     if (t.dates.indexOf(date) < 0) {
@@ -697,4 +756,64 @@ function dc_acceptRows(f, stamp, reason, by) {
   if (f.kind === 'dateDeleted') return [[stamp, k, f.tab, f.date, '*', '', '', reason, by]];
   if (f.kind === 'tabDeleted') return [[stamp, k, f.tab, '*', '', '', '', reason, by]];
   return null;
+}
+
+/* ── 월별 탭 (순수 함수) ── */
+
+/**
+ * 탭 이름에서 월을 읽는다.  «설비 2026-11», «설비 2026.11», «2026년 11월», «26년 11월», «설비 11월» ...
+ * 돌려주는 값: { series: 월을 뺀 이름, y: 연도(모르면 0), m: 월(없으면 0), token: 이름 속 월 표기 }
+ * 월이 없는 이름은 series 가 이름 그대로이고 m 이 0 이다. (이 함수는 앱의 src/sheet/series.ts parseTab 과 같은 규칙)
+ */
+function dc_parseTab(name) {
+  var s = String(name === null || name === undefined ? '' : name).trim();
+  var m, y = 0, mo = 0, token = '';
+  m = s.match(/(\d{4})\s*([-./년])\s*(\d{1,2})\s*(월)?/);
+  if (m && +m[3] >= 1 && +m[3] <= 12) { y = +m[1]; mo = +m[3]; token = m[0]; }
+  else {
+    m = s.match(/(\d{2})\s*년\s*(\d{1,2})\s*월/);
+    if (m && +m[2] >= 1 && +m[2] <= 12) { y = 2000 + +m[1]; mo = +m[2]; token = m[0]; }
+    else {
+      m = s.match(/(\d{1,2})\s*월/);
+      if (m && +m[1] >= 1 && +m[1] <= 12) { mo = +m[1]; token = m[0]; }
+    }
+  }
+  if (!mo) return { series: s, y: 0, m: 0, token: '' };
+  var rest = s.replace(token, ' ').replace(/\s+/g, ' ').replace(/^[\s_\-·.,\/]+|[\s_\-·.,\/]+$/g, '');
+  return { series: rest, y: y, m: mo, token: token };
+}
+
+/** 월 («yyyy-MM»). 연도가 없는 이름(«11월»)은 지금 기준으로 가장 그럴듯한 해를 고른다: 과거는 11개월, 미래는 1개월까지 */
+function dc_tabYM(p, nowY, nowM) {
+  if (!p.m) return '';
+  var y = p.y || (p.m > nowM + 1 ? nowY - 1 : nowY);
+  return y + '-' + dc_pad(p.m);
+}
+
+/** 최근 3개월(이번 달 포함)의 시작 월 */
+function dc_recentFrom(y, m) {
+  m -= 2;
+  if (m < 1) { m += 12; y -= 1; }
+  return y + '-' + dc_pad(m);
+}
+
+/** 확정본 행에서 fromTab 의 항목을 toTab 으로 복사 (toTab 이 이미 있으면 그대로) */
+function dc_copyApproved(rows, fromTab, toTab, stamp) {
+  var has = rows.some(function (r) { return String(r[0]) === toTab; });
+  if (has) return rows;
+  var add = rows.filter(function (r) { return String(r[0]) === fromTab; }).map(function (r) { return [toTab, r[1], r[2], stamp]; });
+  return rows.concat(add);
+}
+
+/** tab 이 아닌 다른 확정 탭 중에 items 와 점검사항·기준이 똑같은 것이 있는가 */
+function dc_sameStructure(rows, tab, items) {
+  if (!items || !items.length) return false;
+  return dc_groupApproved(rows).some(function (g) {
+    if (g.tab === tab || g.items.length !== items.length) return false;
+    for (var i = 0; i < items.length; i++) {
+      if (String(g.items[i].label).trim() !== String(items[i].label).trim()) return false;
+      if (String(g.items[i].criteria || '').trim() !== String(items[i].criteria || '').trim()) return false;
+    }
+    return true;
+  });
 }

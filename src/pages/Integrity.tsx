@@ -61,10 +61,14 @@ export default function Integrity() {
               {s.findings.length > 0 ? `⚠ 시트에서 직접 바뀐 것 ${s.findings.length}건` : s.checkedAt ? '✓ 장부와 시트가 일치합니다' : '아직 검사하지 않았습니다'}
             </div>
             <div className="small muted">
-              {s.checkedAt ? `마지막 검사 ${new Date(s.checkedAt).toLocaleString('ko-KR', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' })} · 비교한 칸 ${s.checked ?? 0}개` : '버튼을 눌러 검사하세요. 앱을 쓰면 6시간마다 자동으로 검사합니다.'}
+              {s.checkedAt ? `마지막 검사 ${new Date(s.checkedAt).toLocaleString('ko-KR', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' })} · ${s.all ? '전체 기간' : '최근 3개월'} · 비교한 칸 ${s.checked ?? 0}개` : '버튼을 눌러 검사하세요. 앱을 쓰면 6시간마다 자동으로 검사합니다.'}
             </div>
             {s.error && <div className="bad-text small">⚠ {s.error}</div>}
-            <button className="btn primary" disabled={s.busy} onClick={() => verifyNow()}>{s.busy ? '검사 중…' : '지금 검사'}</button>
+            <div className="row-btns">
+              <button className="btn primary" disabled={s.busy} onClick={() => verifyNow()}>{s.busy ? '검사 중…' : '지금 검사'}</button>
+              <button className="btn" disabled={s.busy} onClick={() => verifyNow({ all: true })}>전체 기간 검사</button>
+            </div>
+            <div className="small muted">«지금 검사»는 최근 3개월 탭만 봅니다. «전체 기간 검사»는 지난 달 탭까지 모두 읽어서 시간이 더 걸립니다.</div>
           </div>
 
           {tabs.map((tab) => {

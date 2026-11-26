@@ -25,6 +25,8 @@ interface State {
   error?: string;
   checkedAt?: number;
   checked?: number;
+  /** 마지막 검사가 전체 기간이었는지 (아니면 최근 3개월) */
+  all?: boolean;
   findings: Finding[];
 }
 
@@ -37,7 +39,7 @@ const load = (): Partial<State> => {
   }
 };
 const saved = load();
-let state: State = { busy: false, checkedAt: saved.checkedAt, checked: saved.checked, findings: saved.findings ?? [] };
+let state: State = { busy: false, checkedAt: saved.checkedAt, checked: saved.checked, all: saved.all, findings: saved.findings ?? [] };
 const listeners = new Set<() => void>();
 function emit(p: Partial<State>) {
   state = { ...state, ...p };
@@ -56,12 +58,13 @@ export function useIntegrity() {
 export const canRestore = (f: Finding) => f.kind === 'changed' || f.kind === 'deleted' || f.kind === 'rowDeleted' || f.kind === 'dateDeleted';
 
 /** 지금 검사 */
-export async function verifyNow() {
+export async function verifyNow(opts: { all?: boolean } = {}) {
   if (!getConfig() || state.busy) return;
   emit({ busy: true, error: undefined });
   try {
-    const r = await callSheet<{ checked: number; findings: Finding[] }>({ action: 'verify' });
-    const next = { checkedAt: Date.now(), checked: r.checked, findings: r.findings };
+    const all = !!opts.all;
+    const r = await callSheet<{ checked: number; findings: Finding[] }>({ action: 'verify', all });
+    const next = { checkedAt: Date.now(), checked: r.checked, all, findings: r.findings };
     localStorage.setItem(KEY, JSON.stringify(next));
     emit(next);
   } catch (e) {
@@ -85,11 +88,13 @@ export async function resolveFindings(mode: 'restore' | 'accept', items: Finding
     mode,
     reason,
     pin,
+    all: !!state.all,
     inspector: localStorage.getItem('dc:inspector') ?? '',
     items: items.map((f) => ({ kind: f.kind, tab: f.tab, date: f.date, label: f.label })),
   });
+  const all = !!state.all;
   state = { ...state, checkedAt: undefined }; // 바로 다시 검사
-  await verifyNow();
+  await verifyNow({ all });
   await syncNow(); // 되돌린 값을 화면에도 반영
 }
 
