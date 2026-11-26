@@ -11,7 +11,7 @@ import { fileURLToPath } from 'node:url';
 const dir = path.dirname(fileURLToPath(import.meta.url));
 const ctx = vm.createContext({});
 vm.runInContext(fs.readFileSync(path.join(dir, '../apps-script/Code.gs'), 'utf8'), ctx);
-const { dc_read, dc_locate, dc_findRow, dc_initApproved, dc_groupApproved, dc_applyApproval, dc_decide, dc_groupCorrections, TOKEN } = ctx;
+const { dc_read, dc_locate, dc_findRow, dc_initApproved, dc_groupApproved, dc_applyApproval, dc_decide, dc_groupCorrections, dc_verify, dc_expectedMap, dc_findFinding, dc_acceptRows, dc_cast, dc_hasCriteria, dc_SEP, TOKEN } = ctx;
 // 승인 비밀번호: 개발용 기본값 0000 (승인 비밀번호 입력 흐름을 시험하려고). 비우려면  ADMIN_PIN= npm run mock
 const PIN = process.env.ADMIN_PIN ?? '0000';
 const PORT = Number(process.env.PORT || 8787);
@@ -59,8 +59,10 @@ const logRows = [];
 const corrRows = [];
 const stamp = () => new Date().toISOString().slice(0, 16).replace('T', ' ');
 
+const readTabs = () => Object.entries(sheets).map(([tab, s]) => ({ tab, ...dc_read(s.grid, s.notes, fmt, YEAR) }));
+
 function read() {
-  const tabs = Object.entries(sheets).map(([tab, s]) => ({ tab, ...dc_read(s.grid, s.notes, fmt, YEAR) }));
+  const tabs = readTabs();
   if (!approvedRows) approvedRows = dc_initApproved(tabs, stamp());
   return { ok: true, name: '가짜 시트 (개발용)', tabs, approved: dc_groupApproved(approvedRows), pinRequired: !!PIN, corrections: dc_groupCorrections(corrRows) };
 }
@@ -70,6 +72,85 @@ function approve(b) {
   if (!approvedRows) throw new Error('먼저 앱에서 동기화하세요');
   approvedRows = dc_applyApproval(approvedRows, b.tabs || [], b.removed || [], stamp());
   return { ok: true };
+}
+
+/** 기록 검사 (Code.gs 의 verify_ / resolve_ / restoreFinding_ 와 같은 규칙) */
+function verify() {
+  const r = dc_verify(readTabs(), logRows);
+  return { ok: true, at: stamp(), checked: r.checked, findings: r.findings };
+}
+
+const approvedCriteria = (tab, label) => String(approvedRows?.find((r) => r[0] === tab && String(r[1]).trim() === label)?.[2] ?? '');
+
+function restore(f, at, reason, by) {
+  const s = sheets[f.tab];
+  if (!s) return null;
+  const { grid, notes } = s;
+  const labels = grid.map((r) => String(r[0]).trim());
+  const exp = dc_expectedMap(logRows);
+  if (f.kind === 'changed' || f.kind === 'deleted') {
+    const loc = dc_locate(grid, f.date, fmt, YEAR);
+    const r = dc_findRow(labels, f.label);
+    if (loc.col === null || r < 0) return null;
+    grid[r][loc.col] = dc_cast(f.expected);
+    return [[at, '복구', f.tab, f.date, f.label, f.expected, f.actual === undefined ? '' : f.actual, reason, by]];
+  }
+  if (f.kind === 'rowDeleted') {
+    const idx = dc_findRow(labels, '점검자');
+    const at0 = idx < 0 ? grid.length : idx; // 점검자 행 바로 위
+    const W = width(grid);
+    const row = Array(W).fill('');
+    row[0] = f.label;
+    if (dc_hasCriteria(grid[0])) row[1] = approvedCriteria(f.tab, f.label);
+    grid.splice(at0, 0, row);
+    notes.splice(at0, 0, Array(W).fill(''));
+    for (const d of f.dates || []) {
+      const l = dc_locate(grid, d, fmt, YEAR);
+      const e = exp[f.tab + dc_SEP + d + dc_SEP + f.label];
+      if (l.col !== null && e && e.v !== '') grid[at0][l.col] = dc_cast(e.v);
+    }
+    return [[at, '복구', f.tab, '*', f.label, '', '', reason, by]];
+  }
+  if (f.kind === 'dateDeleted') {
+    const loc = dc_locate(grid, f.date, fmt, YEAR);
+    if (loc.col !== null) return null;
+    const col = loc.insertAfter + 1;
+    const [y, m, d] = f.date.split('-').map(Number);
+    grid.forEach((r, i) => r.splice(col, 0, i === 0 ? new Date(y, m - 1, d) : ''));
+    notes.forEach((r) => r.splice(col, 0, ''));
+    for (const c of f.cells || []) {
+      const rr = dc_findRow(grid.map((r) => String(r[0]).trim()), c.label);
+      if (rr >= 0 && c.value !== '') grid[rr][col] = dc_cast(c.value);
+    }
+    return [[at, '복구', f.tab, f.date, '*', '', '', reason, by]];
+  }
+  return null;
+}
+
+function resolve(b) {
+  if (PIN && String(b.pin || '') !== PIN) throw new Error('승인 비밀번호가 맞지 않습니다');
+  const mode = b.mode === 'restore' ? 'restore' : 'accept';
+  let reason = String(b.reason || '').trim();
+  if (mode === 'accept' && !reason) throw new Error('인정 사유를 입력하세요');
+  if (!reason) reason = '시트에서 직접 바뀐 값을 장부의 값으로 되돌림';
+  const current = dc_verify(readTabs(), logRows).findings;
+  const at = stamp();
+  const by = b.inspector || '';
+  const out = [];
+  let done = 0;
+  let skipped = 0;
+  for (const want of b.items || []) {
+    const f = dc_findFinding(current, want);
+    const res = !f ? null : mode === 'accept' ? dc_acceptRows(f, at, reason, by) : restore(f, at, reason, by);
+    if (!res) {
+      skipped++;
+      continue;
+    }
+    out.push(...res);
+    done++;
+  }
+  logRows.push(...out);
+  return { ok: true, done, skipped };
 }
 
 /** 정정 (Code.gs 의 correct_ 와 같은 규칙) */
@@ -125,6 +206,11 @@ function dev(b) {
     const loc = dc_locate(grid, b.date, fmt, YEAR);
     if (i < 0 || loc.col === null) throw new Error('칸 없음');
     grid[i][loc.col] = b.value; // 시트에서 직접 수정한 상황
+  } else if (b.op === 'removeDate') {
+    const loc = dc_locate(grid, b.date, fmt, YEAR);
+    if (loc.col === null) throw new Error('날짜 열 없음');
+    grid.forEach((r) => r.splice(loc.col, 1));
+    notes.forEach((r) => r.splice(loc.col, 1));
   } else if (b.op === 'rename') {
     const i = dc_findRow(labels(), b.from);
     if (i < 0) throw new Error('항목 없음');
@@ -235,6 +321,9 @@ http
           : b.action === 'submit' ? submit(b)
           : b.action === 'approve' ? approve(b)
           : b.action === 'correct' ? correct(b)
+          : b.action === 'verify' ? verify()
+          : b.action === 'resolve' ? resolve(b)
+          : b.action === 'protect' ? { ok: true, mock: true }
           : b.action === '_dev' ? dev(b)
           : { ok: false, error: '알 수 없는 요청' };
       } catch (e) {

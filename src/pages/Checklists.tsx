@@ -111,6 +111,7 @@ function SheetConnect() {
           <button className="btn primary" disabled={sync.busy} onClick={() => syncNow()}>{sync.busy ? '동기화 중…' : '⟳ 지금 동기화'}</button>
           <button className="btn" onClick={() => setEditing(true)}>설정</button>
         </div>
+        <a className="btn center-btn" href="#/integrity">🔍 기록 검사 · 시트 보호</a>
       </div>
     );
   }

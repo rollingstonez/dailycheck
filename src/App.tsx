@@ -7,6 +7,7 @@ import Report from './pages/Report';
 import Checklists from './pages/Checklists';
 import ChecklistEditor from './pages/ChecklistEditor';
 import Changes from './pages/Changes';
+import Integrity from './pages/Integrity';
 
 /** 해시 주소(#/inspect/abc)로 화면 전환 — 서버 설정 없이 오프라인에서도 동작 */
 function useRoute() {
@@ -67,6 +68,9 @@ export default function App() {
       break;
     case 'changes':
       view = <Changes />;
+      break;
+    case 'integrity':
+      view = <Integrity />;
       break;
     case 'checklists':
       view = a ? <ChecklistEditor id={a} /> : <Checklists />;

@@ -4,6 +4,7 @@ import { registerSW } from 'virtual:pwa-register';
 import App from './App';
 import { seedIfEmpty } from './db';
 import { startAutoSync } from './sheet/sync';
+import './sheet/integrity';
 import './styles.css';
 
 registerSW({ immediate: true });

@@ -4,6 +4,7 @@ import { go } from '../App';
 import { prettyDate, today } from '../util';
 import { getConfig, syncNow, useSyncState } from '../sheet/sync';
 import { countChanges } from '../sheet/changes';
+import { useIntegrity } from '../sheet/integrity';
 
 export default function Home() {
   const d = today();
@@ -12,6 +13,7 @@ export default function Home() {
   const sheetIds = new Set(lists?.filter((c) => c.sheetTab).map((c) => c.id));
   const unsent = useLiveQuery(() => db.records.filter((r) => !r.synced && r.checklistId.startsWith('sheet:')).count(), []);
   const sync = useSyncState();
+  const integrity = useIntegrity();
   const cfg = getConfig();
 
   if (!lists || !recs) return null;
@@ -57,6 +59,16 @@ export default function Home() {
           <div className="grow">
             <div className="title">⚠ 시트의 점검항목이 바뀌었습니다</div>
             <div className="muted small">변경 {countChanges(sync.changes)}건 · 확인하고 승인하면 화면에 반영됩니다</div>
+          </div>
+          <span className="badge todo">확인 ›</span>
+        </button>
+      )}
+
+      {cfg && integrity.findings.length > 0 && (
+        <button className="card list-card alert" onClick={() => go('integrity')}>
+          <div className="grow">
+            <div className="title">⚠ 시트에서 직접 바뀐 기록이 있습니다</div>
+            <div className="muted small">{integrity.findings.length}건 · 장부와 다릅니다. 확인하고 되돌리거나 인정하세요</div>
           </div>
           <span className="badge todo">확인 ›</span>
         </button>

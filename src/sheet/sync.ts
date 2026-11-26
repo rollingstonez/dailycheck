@@ -98,6 +98,19 @@ async function call<T>(cfg: SheetConfig, body: object): Promise<T> {
   return j;
 }
 
+/** 연결된 시트에 요청 (기록 검사 등 다른 모듈용) */
+export async function callSheet<T>(body: object): Promise<T> {
+  const cfg = getConfig();
+  if (!cfg) throw new Error('구글 시트가 연결되어 있지 않습니다');
+  return call<T>(cfg, body);
+}
+
+/** 동기화가 끝난 뒤 실행할 일 (예: 기록 검사) */
+const afterSyncHooks = new Set<() => void>();
+export const onAfterSync = (f: () => void) => {
+  afterSyncHooks.add(f);
+};
+
 /** 연결 테스트 + 저장 */
 export async function connect(url: string, token: string) {
   const cfg = { url: url.trim(), token: token.trim() };
@@ -294,6 +307,7 @@ export function syncNow(): Promise<void> {
       localStorage.setItem(LAST_KEY, String(t));
       const msg = [sent ? `시트에 ${sent}건 기록했습니다` : '', skipped.length ? `이미 기록된 칸은 그대로 두었습니다: ${[...new Set(skipped)].join(', ')}` : ''].filter(Boolean).join(' · ');
       emit({ lastSync: t, message: msg || undefined });
+      afterSyncHooks.forEach((f) => f());
     } catch (e) {
       emit({ error: (e as Error).message });
     } finally {

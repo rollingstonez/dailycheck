@@ -22,6 +22,7 @@ var LOG_TAB = '_기록';   // 입력·정정 장부 (덧붙이기만 함, 숨김
 var CORR_TAB = '_정정'; // 정정 내역만 따로 (앱이 읽어서 «정정됨»으로 표시)
 var LOG_HEADER = ['시각', '구분', '탭', '날짜', '항목', '값', '이전값', '사유', '점검자'];
 var CORR_HEADER = ['시각', '탭', '날짜', '항목', '이전값', '정정값', '사유', '정정자'];
+var PROTECT_DESC = '데일리체크 기록 보호'; // 스크립트가 거는 시트 보호의 이름
 var PHOTO_FOLDER = '데일리체크 사진';
 var SPECIAL_INSPECTOR = '점검자';
 var SPECIAL_TIME = '점검시각';
@@ -40,6 +41,9 @@ function doPost(e) {
     if (body.action === 'submit') return json_(submit_(body));
     if (body.action === 'approve') return json_(approve_(body));
     if (body.action === 'correct') return json_(correct_(body));
+    if (body.action === 'verify') return json_(verify_());
+    if (body.action === 'resolve') return json_(resolve_(body));
+    if (body.action === 'protect') return json_(protect_());
     throw new Error('알 수 없는 요청: ' + body.action);
   } catch (err) {
     return json_({ ok: false, error: String((err && err.message) || err) });
@@ -55,11 +59,10 @@ function fmt_() {
   return function (d) { return Utilities.formatDate(d, tz, 'yyyy-MM-dd'); };
 }
 
-function read_() {
-  var ss = SpreadsheetApp.getActive();
+function readTabs_(ss) {
   var fmt = fmt_();
   var year = new Date().getFullYear();
-  var tabs = ss.getSheets()
+  return ss.getSheets()
     .filter(function (s) { return !s.isSheetHidden() && s.getName().charAt(0) !== '_'; })
     .map(function (sh) {
       var rng = sh.getDataRange();
@@ -67,6 +70,11 @@ function read_() {
       r.tab = sh.getName();
       return r;
     });
+}
+
+function read_() {
+  var ss = SpreadsheetApp.getActive();
+  var tabs = readTabs_(ss);
   return { ok: true, name: ss.getName(), tabs: tabs, approved: approved_(ss, tabs), pinRequired: !!ADMIN_PIN, corrections: readCorrections_(ss) };
 }
 
@@ -97,6 +105,7 @@ function approved_(ss, tabs) {
         sh = ss.insertSheet(APPROVED_TAB);
         writeApproved_(sh, dc_initApproved(tabs, stamp_()));
         try { sh.hideSheet(); } catch (e) { /* 숨기지 못해도 «_»로 시작하는 탭은 앱이 무시합니다 */ }
+        try { lockSheet_(sh); protectAll_(ss); } catch (e) { /* 보호를 걸지 못해도 입력·동기화는 계속됩니다 */ }
       }
     } finally {
       lock.releaseLock();
@@ -127,6 +136,7 @@ function hiddenSheet_(name, header) {
     sh = ss.insertSheet(name);
     sh.getRange(1, 1, 1, header.length).setNumberFormat('@').setValues([header]);
     try { sh.hideSheet(); } catch (e) { /* 숨기지 못해도 «_»로 시작하는 탭은 앱이 무시합니다 */ }
+    try { lockSheet_(sh); } catch (e) { /* 보호를 걸지 못해도 계속 */ }
   }
   return sh;
 }
@@ -244,7 +254,157 @@ function submit_(b) {
       }
     });
     appendRows_(hiddenSheet_(LOG_TAB, LOG_HEADER), logRows);
+    try { ensureProtection_(sh); } catch (e) { /* 보호를 걸지 못해도 입력은 저장됨 */ }
     return { ok: true, column: col + 1, missing: missing, photos: uploaded, locked: locked };
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+/* ───────────── 시트 보호 ───────────── */
+
+/**
+ * 기록 칸(날짜 열 전체)을 «보호된 범위(경고)»로 건다.
+ *  - 시트에서 이 칸을 고치거나 이 칸이 들어 있는 행·열을 지우려 하면 구글 시트가 경고를 띄웁니다. (주인 포함)
+ *  - 점검사항·기준 칸(A·B열)과 1행은 보호하지 않아서, 항목을 고치는 일은 그대로 할 수 있습니다.
+ *  - 이 스크립트가 쓰는 값은 경고 없이 들어갑니다.
+ */
+function ensureProtection_(sh) {
+  var head = sh.getRange(1, 1, 1, Math.min(2, sh.getMaxColumns())).getValues()[0];
+  var startCol = dc_hasCriteria(head) ? 3 : 2;
+  var rows = sh.getMaxRows() - 1;
+  var cols = sh.getMaxColumns() - startCol + 1;
+  if (rows < 1 || cols < 1) return;
+  var prots = sh.getProtections(SpreadsheetApp.ProtectionType.RANGE);
+  for (var i = 0; i < prots.length; i++) {
+    if (prots[i].getDescription() !== PROTECT_DESC) continue;
+    var r = prots[i].getRange();
+    if (r.getRow() === 2 && r.getColumn() === startCol && r.getNumRows() >= rows && r.getNumColumns() >= cols) return; // 이미 충분히 보호됨
+    prots[i].remove();
+  }
+  var prot = sh.getRange(2, startCol, rows, cols).protect();
+  prot.setDescription(PROTECT_DESC);
+  prot.setWarningOnly(true);
+}
+
+/** 숨김 장부 탭은 시트 주인만 고칠 수 있게 잠근다 */
+function lockSheet_(sh) {
+  var ps = sh.getProtections(SpreadsheetApp.ProtectionType.SHEET);
+  for (var i = 0; i < ps.length; i++) if (ps[i].getDescription() === PROTECT_DESC) return;
+  var p = sh.protect();
+  p.setDescription(PROTECT_DESC);
+  var me = Session.getEffectiveUser();
+  p.addEditor(me);
+  p.removeEditors(p.getEditors().filter(function (e) { return e.getEmail() !== me.getEmail(); }));
+  if (p.canDomainEdit()) p.setDomainEdit(false);
+}
+
+function protectAll_(ss) {
+  ss.getSheets().forEach(function (sh) {
+    var name = sh.getName();
+    if (name.charAt(0) === '_') lockSheet_(sh);
+    else if (!sh.isSheetHidden()) ensureProtection_(sh);
+  });
+}
+
+function protect_() {
+  var ss = SpreadsheetApp.getActive();
+  hiddenSheet_(LOG_TAB, LOG_HEADER);
+  hiddenSheet_(CORR_TAB, CORR_HEADER);
+  protectAll_(ss);
+  return { ok: true };
+}
+
+/* ───────────── 기록 검사 (장부 ↔ 시트 비교) ───────────── */
+
+function readLogRows_(sh) {
+  return sh.getLastRow() > 1 ? sh.getRange(2, 1, sh.getLastRow() - 1, LOG_HEADER.length).getValues() : [];
+}
+
+function verify_() {
+  var ss = SpreadsheetApp.getActive();
+  var rows = readLogRows_(hiddenSheet_(LOG_TAB, LOG_HEADER));
+  var r = dc_verify(readTabs_(ss), rows);
+  return { ok: true, at: stamp_(), checked: r.checked, findings: r.findings };
+}
+
+function approvedCriteria_(tab, label) {
+  var sh = SpreadsheetApp.getActive().getSheetByName(APPROVED_TAB);
+  if (!sh) return '';
+  var rows = readApprovedRows_(sh);
+  for (var i = 0; i < rows.length; i++) if (String(rows[i][0]) === tab && String(rows[i][1]).trim() === label) return String(rows[i][2] || '');
+  return '';
+}
+
+/** 되돌리기: 장부에 남은 값으로 시트를 복구한다. 성공하면 장부에 남길 줄을, 못 하면 null 을 돌려준다. */
+function restoreFinding_(ss, f, rows, stamp, reason, by) {
+  var sh = ss.getSheetByName(f.tab);
+  if (!sh) return null;
+  var fmt = fmt_(), year = new Date().getFullYear();
+  var grid = sh.getDataRange().getValues();
+  var labels = grid.map(function (row) { return String(row[0]).trim(); });
+  var exp = dc_expectedMap(rows);
+
+  if (f.kind === 'changed' || f.kind === 'deleted') {
+    var loc = dc_locate(grid, f.date, fmt, year);
+    var r = dc_findRow(labels, f.label);
+    if (loc.col === null || r < 0) return null;
+    sh.getRange(r + 1, loc.col + 1).setValue(dc_cast(f.expected));
+    return [[stamp, '복구', f.tab, f.date, f.label, f.expected, f.actual === undefined ? '' : f.actual, reason, by]];
+  }
+  if (f.kind === 'rowDeleted') {
+    var at = dc_findRow(labels, SPECIAL_INSPECTOR);
+    var rowNo = at < 0 ? grid.length + 1 : at + 1; // 점검자 행 바로 위 (원래 위치는 알 수 없음)
+    sh.insertRowBefore(rowNo);
+    sh.getRange(rowNo, 1).setValue(f.label);
+    if (dc_hasCriteria(grid[0] || [])) sh.getRange(rowNo, 2).setValue(approvedCriteria_(f.tab, f.label));
+    (f.dates || []).forEach(function (d) {
+      var l = dc_locate(grid, d, fmt, year);
+      var e = exp[f.tab + dc_SEP + d + dc_SEP + f.label];
+      if (l.col !== null && e && e.v !== '') sh.getRange(rowNo, l.col + 1).setValue(dc_cast(e.v));
+    });
+    return [[stamp, '복구', f.tab, '*', f.label, '', '', reason, by]];
+  }
+  if (f.kind === 'dateDeleted') {
+    var loc2 = dc_locate(grid, f.date, fmt, year);
+    if (loc2.col !== null) return null;
+    sh.insertColumnAfter(loc2.insertAfter + 1);
+    var col = loc2.insertAfter + 1;
+    sh.getRange(1, col + 1).setValue(f.date).setNumberFormat('M/d');
+    (f.cells || []).forEach(function (c) {
+      var rr = dc_findRow(labels, c.label);
+      if (rr >= 0 && c.value !== '') sh.getRange(rr + 1, col + 1).setValue(dc_cast(c.value));
+    });
+    return [[stamp, '복구', f.tab, f.date, '*', '', '', reason, by]];
+  }
+  return null; // 삭제된 탭 등은 구글 시트의 «버전 기록»으로 복원
+}
+
+/** 검사 결과 처리: mode 'restore'(장부 값으로 되돌림) 또는 'accept'(시트 값을 인정, 사유 필수) */
+function resolve_(b) {
+  if (ADMIN_PIN && String(b.pin || '') !== ADMIN_PIN) throw new Error('승인 비밀번호가 맞지 않습니다');
+  var mode = b.mode === 'restore' ? 'restore' : 'accept';
+  var reason = String(b.reason || '').trim();
+  if (mode === 'accept' && !reason) throw new Error('인정 사유를 입력하세요');
+  if (!reason) reason = '시트에서 직접 바뀐 값을 장부의 값으로 되돌림';
+  var lock = LockService.getDocumentLock();
+  lock.waitLock(20000);
+  try {
+    var ss = SpreadsheetApp.getActive();
+    var logSh = hiddenSheet_(LOG_TAB, LOG_HEADER);
+    var rows = readLogRows_(logSh);
+    var current = dc_verify(readTabs_(ss), rows).findings;
+    var stamp = stamp_(), by = b.inspector || '';
+    var out = [], done = 0, skipped = 0;
+    (b.items || []).forEach(function (want) {
+      var f = dc_findFinding(current, want);
+      var res = !f ? null : mode === 'accept' ? dc_acceptRows(f, stamp, reason, by) : restoreFinding_(ss, f, rows, stamp, reason, by);
+      if (!res) { skipped++; return; }
+      out = out.concat(res);
+      done++;
+    });
+    appendRows_(logSh, out);
+    return { ok: true, done: done, skipped: skipped };
   } finally {
     lock.releaseLock();
   }
@@ -400,4 +560,141 @@ function dc_groupCorrections(rows) {
     .map(function (r) {
       return { at: String(r[0]), tab: String(r[1]), date: String(r[2]), label: String(r[3]), from: String(r[4]), to: String(r[5]), reason: String(r[6]), by: String(r[7]) };
     });
+}
+
+/* ── 기록 검사 (순수 함수) ── */
+
+var dc_SEP = '\u0001';
+
+/** 값 비교: 글자가 같거나, 둘 다 숫자이고 값이 같으면 같은 값 */
+function dc_same(a, b) {
+  var x = String(a === null || a === undefined ? '' : a).trim();
+  var y = String(b === null || b === undefined ? '' : b).trim();
+  if (x === y) return true;
+  var nx = Number(x), ny = Number(y);
+  return x !== '' && y !== '' && !isNaN(nx) && !isNaN(ny) && nx === ny;
+}
+
+/** 장부(글자로 저장됨)의 숫자 모양 값은 숫자로 되돌려 시트에 쓴다 */
+function dc_cast(v) {
+  var s = String(v === null || v === undefined ? '' : v).trim();
+  return s !== '' && !isNaN(Number(s)) ? Number(s) : v;
+}
+
+/** 장부 → 칸별 «마지막으로 기록된 값» (입력·정정·직접수정 확인) */
+function dc_expectedMap(rows) {
+  var exp = {};
+  rows.forEach(function (r) {
+    var kind = String(r[1]);
+    if (kind !== '입력' && kind !== '정정' && kind !== '직접수정 확인') return;
+    var tab = String(r[2]), date = String(r[3]), label = String(r[4]).trim();
+    if (!tab || date === '*' || label === '*' || label === '') return;
+    exp[tab + dc_SEP + date + dc_SEP + label] = { v: r[5] === null || r[5] === undefined ? '' : String(r[5]) };
+  });
+  return exp;
+}
+
+/**
+ * 장부와 시트를 비교해 «앱을 거치지 않고 시트에서 직접 바뀐 것»을 찾는다.
+ *   changed     : 값이 장부와 다름
+ *   deleted     : 장부에 있는 값이 시트에서 지워짐
+ *   unlogged    : 장부에 없는 값이 시트에 직접 입력됨 (장부가 시작된 날짜 이후)
+ *   rowDeleted  : 점검항목 행이 통째로 지워짐
+ *   dateDeleted : 날짜 열이 통째로 지워짐
+ *   tabDeleted  : 탭이 지워짐
+ * «직접수정 확인» 으로 인정된 것은 다시 나타나지 않는다.
+ */
+function dc_verify(tabs, rows) {
+  var exp = dc_expectedMap(rows);
+  var ackRow = {}, ackDate = {}, ackTab = {}, logStart = {};
+  rows.forEach(function (r) {
+    var kind = String(r[1]), tab = String(r[2]), date = String(r[3]), label = String(r[4]).trim();
+    if (!tab) return;
+    if (kind === '직접수정 확인') {
+      if (date === '*' && label === '') ackTab[tab] = true;
+      else if (date === '*') ackRow[tab + dc_SEP + label] = true;
+      else if (label === '*') ackDate[tab + dc_SEP + date] = true;
+    }
+    if ((kind === '입력' || kind === '정정') && date !== '*' && (!logStart[tab] || date < logStart[tab])) logStart[tab] = date;
+  });
+
+  var byTab = {};
+  tabs.forEach(function (t) { byTab[t.tab] = t; });
+  var findings = [], checked = 0, tabGone = {}, rowGone = {}, dateGone = {};
+
+  Object.keys(exp).forEach(function (k) {
+    var p = k.split(dc_SEP), tab = p[0], date = p[1], label = p[2], v = exp[k].v;
+    if (ackTab[tab]) return;
+    var t = byTab[tab];
+    if (!t) { tabGone[tab] = (tabGone[tab] || 0) + 1; return; }
+    if (t.dates.indexOf(date) < 0) {
+      if (v !== '' && !ackDate[tab + dc_SEP + date]) {
+        var dg = dateGone[tab + dc_SEP + date] || (dateGone[tab + dc_SEP + date] = { tab: tab, date: date, cells: [] });
+        dg.cells.push({ label: label, value: v });
+      }
+      return;
+    }
+    var item = null;
+    for (var i = 0; i < t.items.length; i++) if (String(t.items[i].label).trim() === label) { item = t.items[i]; break; }
+    if (!item) {
+      if (v !== '' && !ackRow[tab + dc_SEP + label]) {
+        var rg = rowGone[tab + dc_SEP + label] || (rowGone[tab + dc_SEP + label] = { tab: tab, label: label, dates: [] });
+        rg.dates.push(date);
+      }
+      return;
+    }
+    if (ackRow[tab + dc_SEP + label]) return;
+    checked++;
+    var cell = item.values[date];
+    var has = cell !== undefined && cell !== null && String(cell).trim() !== '';
+    if (v === '') {
+      if (has) findings.push({ kind: 'unlogged', tab: tab, date: date, label: label, actual: cell });
+    } else if (!has) {
+      findings.push({ kind: 'deleted', tab: tab, date: date, label: label, expected: v });
+    } else if (!dc_same(cell, v)) {
+      findings.push({ kind: 'changed', tab: tab, date: date, label: label, expected: v, actual: cell });
+    }
+  });
+
+  tabs.forEach(function (t) {
+    var start = logStart[t.tab];
+    if (!start || ackTab[t.tab]) return;
+    t.items.forEach(function (it) {
+      var label = String(it.label).trim();
+      if (ackRow[t.tab + dc_SEP + label]) return;
+      Object.keys(it.values).forEach(function (date) {
+        if (date < start || exp[t.tab + dc_SEP + date + dc_SEP + label] !== undefined) return;
+        if (ackDate[t.tab + dc_SEP + date]) return;
+        if (String(it.values[date]).trim() === '') return;
+        findings.push({ kind: 'unlogged', tab: t.tab, date: date, label: label, actual: it.values[date] });
+      });
+    });
+  });
+
+  Object.keys(rowGone).forEach(function (k) { rowGone[k].kind = 'rowDeleted'; rowGone[k].dates.sort(); findings.push(rowGone[k]); });
+  Object.keys(dateGone).forEach(function (k) { dateGone[k].kind = 'dateDeleted'; findings.push(dateGone[k]); });
+  Object.keys(tabGone).forEach(function (tab) { findings.push({ kind: 'tabDeleted', tab: tab, count: tabGone[tab] }); });
+  findings.sort(function (a, b) { return (a.tab + (a.date || '') + (a.label || '')).localeCompare(b.tab + (b.date || '') + (b.label || '')); });
+  return { checked: checked, findings: findings.slice(0, 300) };
+}
+
+/** 요청한 항목과 같은 검사 결과를 찾는다 */
+function dc_findFinding(findings, want) {
+  for (var i = 0; i < findings.length; i++) {
+    var f = findings[i];
+    if (f.kind === want.kind && f.tab === want.tab && (f.date || '') === (want.date || '') && (f.label || '') === (want.label || '')) return f;
+  }
+  return null;
+}
+
+/** «시트 값 인정»: 장부에 남길 줄. 이후 검사에서 같은 건은 나타나지 않는다. */
+function dc_acceptRows(f, stamp, reason, by) {
+  var k = '직접수정 확인';
+  if (f.kind === 'changed' || f.kind === 'deleted' || f.kind === 'unlogged') {
+    return [[stamp, k, f.tab, f.date, f.label, f.actual === undefined || f.actual === null ? '' : f.actual, f.expected || '', reason, by]];
+  }
+  if (f.kind === 'rowDeleted') return [[stamp, k, f.tab, '*', f.label, '', '', reason, by]];
+  if (f.kind === 'dateDeleted') return [[stamp, k, f.tab, f.date, '*', '', '', reason, by]];
+  if (f.kind === 'tabDeleted') return [[stamp, k, f.tab, '*', '', '', '', reason, by]];
+  return null;
 }
