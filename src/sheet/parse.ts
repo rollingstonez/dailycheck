@@ -16,6 +16,10 @@ export const REMARK_LABEL = '특이사항';
 
 export interface SheetTab {
   tab: string;
+  /** 탭 이름에서 읽은 월 «yyyy-MM» (월이 없으면 '') */
+  ym?: string;
+  /** 오래된 월별 탭: 이름만 받음 (내용은 필요할 때 따로 불러온다) */
+  lite?: boolean;
   hasCriteria: boolean;
   dates: string[];
   items: SheetItem[];

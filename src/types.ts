@@ -35,19 +35,45 @@ export interface CheckItem {
   sheetCriteria?: string;
 }
 
+/** 시트 점검표를 이루는 탭 하나 (월별 탭이면 월마다 하나) */
+export interface SheetTabRef {
+  tab: string;
+  /** yyyy-MM, 월이 없는 탭은 '' */
+  ym: string;
+  /** 이 탭의 기록을 이 기기에 받아 두었는지 (오래된 달은 필요할 때 받는다) */
+  loaded: boolean;
+  /** 이 탭의 점검항목 (그 달에 입력할 화면은 그 달 탭의 항목으로 만든다) */
+  items?: CheckItem[];
+}
+
 export interface Checklist {
   id: string;
   name: string;
   description?: string;
   items: CheckItem[];
-  /** 구글 시트 탭에서 온 점검표면 그 탭 이름 */
+  /** 구글 시트에서 온 점검표면 가장 최근 탭 이름 */
   sheetTab?: string;
+  /** 월별 탭(«설비 2026-11», «설비 2026-12» …)을 하나로 묶은 점검표 */
+  monthly?: boolean;
+  /** 이 점검표를 이루는 탭들 */
+  tabs?: SheetTabRef[];
   createdAt: number;
   updatedAt: number;
 }
 
 /** 항목별 입력값. 사진은 photos 표의 id 목록으로 저장 */
 export type ItemValue = 'yes' | 'no' | number | string | string[] | null;
+
+/** 정정 내역: 원본값은 지워지지 않고 여기와 시트 장부에 남는다 */
+export interface Correction {
+  itemId: string;
+  from: ItemValue;
+  to: ItemValue;
+  reason: string;
+  by: string;
+  /** yyyy-MM-dd HH:mm */
+  at: string;
+}
 
 export interface InspectionRecord {
   id: string;
@@ -63,6 +89,8 @@ export interface InspectionRecord {
   itemsSnapshot: CheckItem[];
   createdAt: number;
   updatedAt: number;
+  /** 이 기록이 들어 있는 시트 탭 (월별 탭이면 그 달의 탭) */
+  tab?: string;
   /** 점검 시각 HH:mm */
   time?: string;
   /** 항목별 사진 (photos 표의 id) */
@@ -71,6 +99,8 @@ export interface InspectionRecord {
   photoNotes?: Record<string, string>;
   /** 시트에 올라간 사진 링크 (항목별) */
   photoLinks?: Record<string, string[]>;
+  /** 정정 내역 (원본 → 정정값, 사유) */
+  corrections?: Correction[];
   /** 구글 시트에 반영 여부 (시트 연결이 없는 점검표는 항상 false) */
   synced: boolean;
   /** 마지막 동기화 실패 사유 */

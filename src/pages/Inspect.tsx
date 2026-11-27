@@ -2,10 +2,12 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { useLiveQuery } from 'dexie-react-hooks';
 import { db } from '../db';
 import { go } from '../App';
-import type { CheckItem, InspectionRecord, ItemValue } from '../types';
-import { compressImage, criteriaText, hhmm, isAbnormal, stampNow, today, uid } from '../util';
+import type { CheckItem, Correction, InspectionRecord, ItemValue } from '../types';
+import { compressImage, criteriaText, formatValue, hhmm, isAbnormal, stampNow, today, uid } from '../util';
 import PhotoThumb from '../components/PhotoThumb';
-import { sheetRecordId, syncNow } from '../sheet/sync';
+import { sheetRecordId, syncNow, useSyncState } from '../sheet/sync';
+import { correctRecord } from '../correct';
+import { itemsForDate } from '../sheet/series';
 import { REMARK_LABEL, sheetItemId } from '../sheet/parse';
 
 const INSPECTOR_KEY = 'dc:inspector';
@@ -29,29 +31,33 @@ export default function Inspect({ checklistId, recordId }: Props) {
   const [date, setDate] = useState(today());
   const [missing, setMissing] = useState<string[]>([]);
   const [saving, setSaving] = useState(false);
+  const [confirming, setConfirming] = useState(false);
+  const [correcting, setCorrecting] = useState<CheckItem | null>(null);
+  const sync = useSyncState();
   // 사진은 찍는 즉시 이 id로 기기에 저장해 둔다
   const tempId = useMemo(() => recordId ?? 'tmp-' + uid(), [recordId]);
   const draftKey = `dc:draft:${checklistId}:${recordId ?? 'new'}`;
   const loaded = useRef(false);
 
   useEffect(() => {
+    loaded.current = false;
+    setMissing([]);
+    setConfirming(false);
+    setCorrecting(null);
     (async () => {
       const rec = recordId ? await db.records.get(recordId) : null;
       setExisting(rec ?? null);
       const draft = localStorage.getItem(draftKey);
-      if (draft) {
-        const d = JSON.parse(draft);
-        setValues(d.values ?? {});
-        setPhotos(d.photos ?? {});
-        setNotes(d.notes ?? {});
-        if (d.date) setDate(d.date);
-      } else if (rec) {
-        setValues(rec.values);
-        setPhotos(rec.photos ?? {});
-        setNotes(rec.photoNotes ?? {});
-        setDate(rec.date);
-        if (rec.inspector) setInspector(rec.inspector);
-      }
+      const d = draft ? JSON.parse(draft) : null;
+      // 이미 저장된 값은 항상 기록 쪽이 우선 (임시 저장본이 오래되었을 수 있음)
+      const recorded = Object.fromEntries(Object.entries(rec?.values ?? {}).filter(([, v]) => hasValue(v as ItemValue)));
+      setValues({ ...(d ? d.values ?? {} : rec?.values ?? {}), ...recorded });
+      const merged: Photos = { ...(d?.photos ?? {}) };
+      for (const [k, ids] of Object.entries(rec?.photos ?? {})) merged[k] = [...new Set([...(ids as string[]), ...(merged[k] ?? [])])];
+      setPhotos(merged);
+      setNotes({ ...(rec?.photoNotes ?? {}), ...(d?.notes ?? {}) });
+      setDate(rec ? rec.date : d?.date ?? today());
+      if (rec?.inspector && !localStorage.getItem(INSPECTOR_KEY)) setInspector(rec.inspector);
       loaded.current = true;
     })();
   }, [recordId, draftKey]);
@@ -64,8 +70,8 @@ export default function Inspect({ checklistId, recordId }: Props) {
   if (checklist === undefined || existing === undefined) return null;
   if (checklist === null) return <div className="page">점검표를 찾을 수 없습니다.</div>;
 
-  const items = checklist.items;
-  // «이상 발견» 사진·메모가 들어갈 행: 점검표에 특이사항 항목이 있으면 그것, 없으면 저장 때 새로 만든다
+  const items = itemsForDate(checklist, date);
+  // «이상 발견» 사진·메모가 들어갈 행: 점검표에 «특이사항» 항목이 있으면 그것, 없으면 저장할 때 새로 만든다
   const remarkInList = items.find((i) => (i.sheetLabel ?? i.label).trim() === REMARK_LABEL);
   const remark: CheckItem = remarkInList ?? {
     id: checklist.sheetTab ? sheetItemId(checklist.sheetTab, REMARK_LABEL) : 'remark',
@@ -75,6 +81,10 @@ export default function Inspect({ checklistId, recordId }: Props) {
     sheetLabel: checklist.sheetTab ? REMARK_LABEL : undefined,
   };
   const remarkUsed = !remarkInList && (hasValue(values[remark.id]) || (photos[remark.id]?.length ?? 0) > 0);
+  const recVals = existing?.values ?? {};
+  /** 이미 저장된 값은 잠김 (고치려면 «정정») */
+  const isLocked = (i: CheckItem) => i.type !== 'photo' && hasValue(recVals[i.id]);
+  const lockedPhotos = new Set(Object.values(existing?.photos ?? {}).flat());
   const filledOf = (i: CheckItem) => (i.type === 'photo' ? (photos[i.id]?.length ?? 0) > 0 : hasValue(values[i.id]));
   const set = (id: string, v: ItemValue) => {
     setValues((p) => ({ ...p, [id]: v }));
@@ -87,8 +97,23 @@ export default function Inspect({ checklistId, recordId }: Props) {
 
   const filled = items.filter(filledOf).length;
   const abnormalNow = items.filter((i) => isAbnormal(i, values[i.id]));
+  const newItems = items.filter((i) => !isLocked(i) && i.type !== 'photo' && hasValue(values[i.id]));
+  const newPhotoCount = Object.values(photos).flat().filter((id) => !lockedPhotos.has(id)).length;
 
-  async function save() {
+  async function changeDate(d: string) {
+    setDate(d);
+    if (existing) return;
+    // 같은 날짜에 이미 기록이 있으면 그 기록을 연다 (새로 만들어 덮어쓰지 않는다)
+    const dup = checklist!.sheetTab
+      ? await db.records.get(sheetRecordId(checklist!.id, d))
+      : await db.records.where('[checklistId+date]').equals([checklist!.id, d]).first();
+    if (dup) {
+      alert('이 날짜에는 이미 기록이 있습니다. 그 기록을 엽니다.');
+      go('inspect', checklist!.id, dup.id);
+    }
+  }
+
+  function review() {
     const miss = items.filter((i) => i.required && !filledOf(i)).map((i) => i.id);
     if (miss.length) {
       setMissing(miss);
@@ -100,63 +125,87 @@ export default function Inspect({ checklistId, recordId }: Props) {
       document.getElementById('inspector')?.focus();
       return;
     }
-    const empty = items.length - filled;
-    if (empty > 0 && !confirm(`${empty}개 항목이 비어 있습니다. 이대로 저장할까요?`)) {
-      const first = items.find((i) => !filledOf(i));
-      if (first) document.getElementById('item-' + first.id)?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    if (newItems.length === 0 && newPhotoCount === 0) {
+      alert('새로 입력한 내용이 없습니다.');
       return;
     }
+    setConfirming(true);
+  }
 
-    // 시트 점검표는 «탭 + 날짜» 하나에 기록 하나 (= 시트의 날짜 열 하나)
-    const finalId = checklist!.sheetTab ? sheetRecordId(checklist!.id, date) : recordId ?? uid();
-    if (finalId !== recordId) {
-      const clash = await db.records.get(finalId);
-      if (clash && !confirm(`${date}에 이미 기록이 있습니다. 덮어쓸까요?`)) return;
-    }
-
+  async function doSave() {
     setSaving(true);
-    localStorage.setItem(INSPECTOR_KEY, inspector.trim());
-    const now = Date.now();
-    const cleanPhotos = Object.fromEntries(Object.entries(photos).filter(([, v]) => v.length));
-    const cleanNotes = Object.fromEntries(Object.entries(notes).filter(([id, v]) => v.trim() && cleanPhotos[id]).map(([id, v]) => [id, v.trim()]));
-    const snapItems = remarkUsed ? [...items, remark] : items;
-    const rec: InspectionRecord = {
-      id: finalId,
-      checklistId: checklist!.id,
-      checklistName: checklist!.name,
-      date,
-      time: hhmm(),
-      inspector: inspector.trim(),
-      values,
-      photos: cleanPhotos,
-      photoNotes: cleanNotes,
-      photoLinks: existing?.date === date ? existing?.photoLinks : undefined,
-      abnormal: abnormalNow.map((i) => i.id),
-      itemsSnapshot: existing && !checklist!.sheetTab ? mergeSnapshot(existing.itemsSnapshot, snapItems) : snapItems,
-      createdAt: existing?.createdAt ?? now,
-      updatedAt: now,
-      synced: false,
-    };
-    await db.transaction('rw', db.records, db.photos, async () => {
-      if (recordId && recordId !== finalId) await db.records.delete(recordId);
-      await db.records.put(rec);
-      // 사진을 최종 기록에 연결하고, 지운 사진은 정리
-      const keep = new Set(Object.values(cleanPhotos).flat());
-      await db.photos.where('recordId').anyOf([tempId, finalId]).modify((p, ref) => {
-        if (!keep.has(p.id)) delete (ref as { value?: unknown }).value;
-        else p.recordId = finalId;
+    try {
+      if (!existing) {
+        const dup = checklist!.sheetTab
+          ? await db.records.get(sheetRecordId(checklist!.id, date))
+          : await db.records.where('[checklistId+date]').equals([checklist!.id, date]).first();
+        if (dup) {
+          setConfirming(false);
+          alert('이 날짜에는 이미 기록이 있습니다. 그 기록을 열어 보완하세요.');
+          go('inspect', checklist!.id, dup.id);
+          return;
+        }
+      }
+      const finalId = existing ? existing.id : checklist!.sheetTab ? sheetRecordId(checklist!.id, date) : uid();
+      localStorage.setItem(INSPECTOR_KEY, inspector.trim());
+      const now = Date.now();
+      const cleanPhotos = Object.fromEntries(Object.entries(photos).filter(([, v]) => v.length));
+      const cleanNotes = Object.fromEntries(
+        Object.entries(notes)
+          .filter(([id, v]) => v.trim() && cleanPhotos[id])
+          .map(([id, v]) => [id, v.trim()]),
+      );
+      const snapItems = remarkUsed ? [...items, remark] : items;
+      const rec: InspectionRecord = {
+        id: finalId,
+        checklistId: checklist!.id,
+        checklistName: checklist!.name,
+        date: existing?.date ?? date,
+        time: existing?.time ?? hhmm(),
+        inspector: inspector.trim(),
+        values,
+        photos: cleanPhotos,
+        photoNotes: cleanNotes,
+        photoLinks: existing?.photoLinks,
+        corrections: existing?.corrections,
+        abnormal: abnormalNow.map((i) => i.id),
+        itemsSnapshot: existing && !checklist!.sheetTab ? mergeSnapshot(existing.itemsSnapshot, snapItems) : snapItems,
+        createdAt: existing?.createdAt ?? now,
+        updatedAt: now,
+        synced: false,
+      };
+      await db.transaction('rw', db.records, db.photos, async () => {
+        await db.records.put(rec);
+        // 사진을 최종 기록에 연결하고, 지운 사진은 정리
+        const keep = new Set(Object.values(cleanPhotos).flat());
+        await db.photos.where('recordId').anyOf([tempId, finalId]).modify((p, ref) => {
+          if (!keep.has(p.id)) delete (ref as { value?: unknown }).value;
+          else p.recordId = finalId;
+        });
       });
-    });
-    localStorage.removeItem(draftKey);
-    syncNow();
-    go();
+      localStorage.removeItem(draftKey);
+      syncNow();
+      go();
+    } finally {
+      setSaving(false);
+    }
   }
 
   async function cancel() {
-    if (filled > 0 && !existing && !confirm('저장하지 않고 나갈까요? 입력한 내용이 사라집니다.')) return;
+    if ((newItems.length > 0 || newPhotoCount > 0) && !confirm('저장하지 않고 나갈까요? 입력한 내용이 사라집니다.')) return;
     localStorage.removeItem(draftKey);
-    if (!existing) await db.photos.where('recordId').equals(tempId).delete();
+    await db.photos.where('recordId').equals(tempId).filter((p) => !lockedPhotos.has(p.id)).delete();
     go();
+  }
+
+  async function afterCorrection() {
+    setCorrecting(null);
+    if (!existing) return;
+    const rec = await db.records.get(existing.id);
+    if (rec) {
+      setExisting(rec);
+      setValues((v) => ({ ...v, ...rec.values }));
+    }
   }
 
   return (
@@ -170,6 +219,12 @@ export default function Inspect({ checklistId, recordId }: Props) {
         <span className="muted small">{filled}/{items.length}</span>
       </header>
 
+      {existing && (
+        <div className="card notice small">
+          🔒 저장된 값은 잠겨 있습니다. 고치려면 <b>정정</b>을 누르세요 (사유를 남기고, 원본 값은 기록으로 남습니다). 비어 있는 항목은 이어서 입력할 수 있습니다.
+        </div>
+      )}
+
       <div className="card row2">
         <label>
           점검자
@@ -177,7 +232,7 @@ export default function Inspect({ checklistId, recordId }: Props) {
         </label>
         <label>
           날짜
-          <input type="date" value={date} max={today()} onChange={(e) => e.target.value && setDate(e.target.value)} />
+          <input type="date" value={date} max={today()} disabled={!!existing} onChange={(e) => e.target.value && changeDate(e.target.value)} />
         </label>
       </div>
 
@@ -195,16 +250,17 @@ export default function Inspect({ checklistId, recordId }: Props) {
             missing={missing.includes(item.id)}
             recordId={tempId}
             stamp={[checklist.name, item.label + (item.unit ? ` (${item.unit})` : '')]}
+            locked={isLocked(item)}
+            lockedPhotos={lockedPhotos}
+            onCorrect={() => setCorrecting(item)}
+            corrections={(existing?.corrections ?? []).filter((c) => c.itemId === item.id)}
+            links={existing?.photoLinks?.[item.id] ?? []}
           />
         ))}
         {items.length === 0 && <div className="empty muted">항목이 없습니다.</div>}
       </div>
 
-      {remarkInList ? (
-        <button className="btn found" onClick={() => document.getElementById('item-' + remarkInList.id)?.scrollIntoView({ behavior: 'smooth', block: 'center' })}>
-          📷 점검표에 없는 이상 발견 → {REMARK_LABEL}에 사진·메모
-        </button>
-      ) : (
+      {remarkInList ? null : (
         <div className="card found-card">
           <div className="found-head">
             <div>
@@ -240,10 +296,55 @@ export default function Inspect({ checklistId, recordId }: Props) {
           <div className="warn">⚠ 기준 벗어남 {abnormalNow.length}건: {abnormalNow.map((i) => i.label).join(', ')}</div>
         )}
         {missing.length > 0 && <div className="warn">필수 항목 {missing.length}개가 비어 있습니다</div>}
-        <button className="btn primary big" disabled={saving} onClick={save}>
-          {existing ? '수정 저장' : '저장'}
+        <button className="btn primary big" disabled={saving} onClick={review}>
+          {existing ? '보완 저장' : '저장'}
         </button>
       </div>
+
+      {confirming && (
+        <div className="overlay">
+          <div className="sheet">
+            <h3>저장 전 확인</h3>
+            <div className="small muted">
+              저장하면 입력한 값은 <b>잠깁니다.</b> 이후 고치려면 사유를 남기는 «정정»을 해야 하고, 원본 값은 기록으로 남습니다. 값이 맞는지 한 번 더 확인하세요.
+            </div>
+            <ul className="confirm-list">
+              {newItems.map((i) => {
+                const bad = isAbnormal(i, values[i.id]);
+                return (
+                  <li key={i.id} className={bad ? 'bad' : ''}>
+                    <span>{i.label}</span>
+                    <b>{formatValue(i, values[i.id])}{bad && ' ⚠'}</b>
+                  </li>
+                );
+              })}
+              {newPhotoCount > 0 && (
+                <li>
+                  <span>사진</span>
+                  <b>{newPhotoCount}장</b>
+                </li>
+              )}
+            </ul>
+            {items.length - filled > 0 && <div className="small muted">비어 있는 항목 {items.length - filled}개 — 나중에 이어서 입력할 수 있습니다.</div>}
+            <div className="row-btns">
+              <button className="btn big" disabled={saving} onClick={() => setConfirming(false)}>돌아가서 확인</button>
+              <button className="btn primary big" disabled={saving} onClick={doSave}>{saving ? '저장 중…' : '저장'}</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {correcting && existing && (
+        <CorrectDialog
+          item={correcting}
+          current={existing.values[correcting.id]}
+          needPin={sync.pinRequired && !!checklist.sheetTab}
+          inspector={inspector.trim() || existing.inspector}
+          recordId={existing.id}
+          onClose={() => setCorrecting(null)}
+          onDone={afterCorrection}
+        />
+      )}
     </div>
   );
 }
@@ -260,20 +361,34 @@ interface RowProps {
   onChange: (v: ItemValue) => void;
   photos: string[];
   onPhotos: (ids: string[]) => void;
-  note: string;
-  onNote: (t: string) => void;
   missing: boolean;
   recordId: string;
   stamp: string[];
+  locked: boolean;
+  lockedPhotos: Set<string>;
+  onCorrect: () => void;
+  corrections: Correction[];
+  links: string[];
+  note: string;
+  onNote: (t: string) => void;
 }
 
-/** 시트의 한 행 = 화면의 한 줄:  [유량]  (ml)  [ 150 ]  📷 */
-function ItemRow({ item, value, onChange, photos, onPhotos, note, onNote, missing, recordId, stamp }: RowProps) {
+/** 시트의 한 행 = 화면의 한 줄:  [유량]  (ml)  [ 150 ]  📷   (저장된 값은 🔒 + 정정) */
+function ItemRow({ item, value, onChange, photos, onPhotos, missing, recordId, stamp, locked, lockedPhotos, onCorrect, corrections, links, note, onNote }: RowProps) {
   const bad = isAbnormal(item, value);
   const crit = criteriaText(item);
   // 📷 는 어느 항목에나 항상 있다. 사진이 필요한 항목·기준 벗어난 항목에서만 진하게
   const camStrong = item.photo || item.type === 'photo' || bad || photos.length > 0;
   const wide = item.type === 'memo' || (item.type === 'choice' && ((item.options?.length ?? 0) > 2 || (item.options ?? []).some((o) => o.length > 4)));
+  const lockedView = (
+    <>
+      <div className="ri-locked">
+        <span className="v">{formatValue(item, value) || '—'}</span>
+        <span aria-hidden>🔒</span>
+      </div>
+      <button className="ri-fix" onClick={onCorrect}>정정</button>
+    </>
+  );
 
   return (
     <div id={'item-' + item.id} className={'ri ' + (bad ? 'is-bad ' : '') + (missing ? 'is-missing ' : '') + (wide ? 'wide' : '')}>
@@ -284,20 +399,87 @@ function ItemRow({ item, value, onChange, photos, onPhotos, note, onNote, missin
           {crit && <div className="ri-crit">{crit}</div>}
         </div>
         {item.type === 'number' && <div className="ri-unit">{item.unit ? `(${item.unit})` : ''}</div>}
-        {!wide && item.type !== 'photo' && <ItemInput item={item} value={value} onChange={onChange} />}
+        {!wide && item.type !== 'photo' && (locked ? lockedView : <ItemInput item={item} value={value} onChange={onChange} />)}
         <PhotoButton ids={photos} onChange={onPhotos} recordId={recordId} stamp={stamp} highlight={!!item.photo && photos.length === 0} dim={!camStrong} />
       </div>
-      {wide && <ItemInput item={item} value={value} onChange={onChange} />}
-      {photos.length > 0 && (
-        <div className="photos sm">
-          {photos.map((id) => (
-            <PhotoThumb key={id} id={id} onRemove={() => onPhotos(photos.filter((x) => x !== id))} />
-          ))}
-        </div>
-      )}
+      {wide && (locked ? <div className="ri-locked-row">{lockedView}</div> : <ItemInput item={item} value={value} onChange={onChange} />)}
       {photos.length > 0 && item.type !== 'memo' && (
         <input className="ri-in ri-memo ri-note" value={note} onChange={(e) => onNote(e.target.value)} placeholder="무엇이 이상한가요? (선택)" />
       )}
+      {corrections.map((c, i) => (
+        <div key={i} className="ri-corr">
+          ✎ 정정 {formatValue(item, c.from) || '—'} → <b>{formatValue(item, c.to)}</b> · 사유: {c.reason} · {c.by} · {c.at}
+        </div>
+      ))}
+      {(photos.length > 0 || links.length > 0) && (
+        <div className="photos sm">
+          {photos.map((id) => (
+            <PhotoThumb key={id} id={id} onRemove={lockedPhotos.has(id) ? undefined : () => onPhotos(photos.filter((x) => x !== id))} />
+          ))}
+          {photos.length === 0 && links.map((u, k) => (
+            <a key={u} className="small" href={u} target="_blank" rel="noreferrer">📷 사진 {k + 1}</a>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** 정정 창: 새 값 + 사유(필수) (+ 승인 비밀번호). 원본은 지워지지 않는다. */
+function CorrectDialog({ item, current, needPin, inspector, recordId, onClose, onDone }: {
+  item: CheckItem;
+  current: ItemValue | undefined;
+  needPin: boolean;
+  inspector: string;
+  recordId: string;
+  onClose: () => void;
+  onDone: () => void;
+}) {
+  const [value, setValue] = useState<ItemValue>(current ?? null);
+  const [reason, setReason] = useState('');
+  const [pin, setPin] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState('');
+
+  async function submit() {
+    setBusy(true);
+    setErr('');
+    try {
+      await correctRecord({ recordId, itemId: item.id, value, reason, pin, inspector });
+      onDone();
+    } catch (e) {
+      setErr((e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="overlay">
+      <div className="sheet">
+        <h3>정정: {item.label}{item.unit ? ` (${item.unit})` : ''}</h3>
+        <div className="small muted">
+          지금 기록된 값 <b>{formatValue(item, current)}</b> · 원본은 지워지지 않고, 정정 내역(사유·시각)과 함께 남습니다.
+        </div>
+        <div className="correct-input">
+          <ItemInput item={item} value={value} onChange={setValue} />
+        </div>
+        <label>
+          정정 사유 (필수)
+          <textarea rows={2} value={reason} onChange={(e) => setReason(e.target.value)} placeholder="예: 숫자를 잘못 눌렀음 (165 → 16.5)" />
+        </label>
+        {needPin && (
+          <label>
+            승인 비밀번호
+            <input type="password" value={pin} onChange={(e) => setPin(e.target.value)} inputMode="numeric" autoComplete="off" />
+          </label>
+        )}
+        {err && <div className="bad-text small">⚠ {err}</div>}
+        <div className="row-btns">
+          <button className="btn big" disabled={busy} onClick={onClose}>취소</button>
+          <button className="btn primary big" disabled={busy || !reason.trim() || (needPin && !pin)} onClick={submit}>{busy ? '정정 중…' : '정정 저장'}</button>
+        </div>
+      </div>
     </div>
   );
 }

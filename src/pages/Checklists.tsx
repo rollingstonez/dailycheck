@@ -39,7 +39,7 @@ export default function Checklists() {
           <div className="grow">
             <div className="title">{c.name}</div>
             <div className="muted">
-              {c.sheetTab ? '📄 구글 시트 탭 · ' : '이 기기에서 만든 점검표 · '}항목 {c.items.length}개
+              {c.monthly ? `📄 월별 탭 ${c.tabs?.length ?? 0}개 · ` : c.sheetTab ? '📄 구글 시트 탭 · ' : '이 기기에서 만든 점검표 · '}항목 {c.items.length}개
             </div>
           </div>
           <span className="muted">{c.sheetTab ? '보기 ›' : '편집 ›'}</span>
@@ -111,6 +111,7 @@ function SheetConnect() {
           <button className="btn primary" disabled={sync.busy} onClick={() => syncNow()}>{sync.busy ? '동기화 중…' : '⟳ 지금 동기화'}</button>
           <button className="btn" onClick={() => setEditing(true)}>설정</button>
         </div>
+        <a className="btn center-btn" href="#/integrity">🔍 기록 검사 · 시트 보호</a>
       </div>
     );
   }

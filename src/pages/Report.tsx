@@ -5,7 +5,7 @@ import type { CheckItem, InspectionRecord } from '../types';
 import { criteriaText, fmtNum, formatValue, toDateStr, today } from '../util';
 import { exportRecordsCsv } from './Records';
 import { byOrder } from './Home';
-import { getConfig, makeSheetReport } from '../sheet/sync';
+import { ensureRange, getConfig, makeSheetReport, useSyncState } from '../sheet/sync';
 
 type Mode = 'week' | 'month';
 const WEEK = ['월', '화', '수', '목', '금', '토', '일'];
@@ -43,6 +43,11 @@ export default function Report() {
   }, [lists, listId]);
 
   const r = rangeOf(mode, anchor);
+  const sync = useSyncState();
+  // 오래된 월별 탭은 동기화 때 이름만 받으므로, 그 기간을 볼 때 내용을 불러온다
+  useEffect(() => {
+    if (listId) ensureRange(listId, r.from, r.to);
+  }, [listId, r.from, r.to]);
   const recs = useLiveQuery(
     () => (listId ? db.records.where('[checklistId+date]').between([listId, r.from], [listId, r.to], true, true).sortBy('date') : []),
     [listId, r.from, r.to],
@@ -83,7 +88,13 @@ export default function Report() {
         </label>
       </div>
 
-      {mode === 'month' && checklist?.sheetTab && getConfig() && <SheetReport tab={checklist.sheetTab} month={anchor.slice(0, 7)} />}
+      {sync.loadingOld && <div className="card notice small no-print">지난 달 기록을 불러오는 중…</div>}
+      {mode === 'month' && checklist?.sheetTab && getConfig() && (
+        <SheetReport
+          tab={checklist.tabs?.find((t) => t.ym === anchor.slice(0, 7))?.tab ?? checklist.sheetTab}
+          month={anchor.slice(0, 7)}
+        />
+      )}
 
       {checklist && recs && (
         <ReportBody mode={mode} title={title} name={checklist.name} currentItems={checklist.items} recs={recs} days={r.days} start={r.start} />
@@ -120,6 +131,7 @@ function ReportBody({ mode, title, name, currentItems, recs, days, start }: Body
   for (const e of abnormalEvents) abnormalByItem.set(e.item.id, (abnormalByItem.get(e.item.id) ?? 0) + 1);
   const topBad = [...abnormalByItem.entries()].sort((a, b) => b[1] - a[1]).slice(0, 3);
   const inspectors = [...new Set(recs.map((r) => r.inspector).filter(Boolean))];
+  const correctionCount = recs.reduce((n, r) => n + (r.corrections?.length ?? 0), 0);
 
   const summary: string[] = [];
   if (recs.length === 0) summary.push('이 기간에는 점검 기록이 없습니다.');
@@ -142,6 +154,8 @@ function ReportBody({ mode, title, name, currentItems, recs, days, start }: Body
       }
     }
   }
+
+  if (correctionCount > 0) summary.push(`정정 ${correctionCount}건 (✎ 표시). 원본 값과 사유는 기록에 남아 있습니다.`);
 
   const lead = mode === 'month' ? (start.getDay() + 6) % 7 : 0;
 
@@ -209,7 +223,7 @@ function ReportBody({ mode, title, name, currentItems, recs, days, start }: Body
   );
 }
 
-/** 구글 시트 안에 «_월간 YYYY-MM 탭» 보고서 탭 + 그래프 만들기 */
+/** 구글 시트 안에 «_월간 YYYY-MM …» 보고서 탭 + 그래프 만들기 */
 function SheetReport({ tab, month }: { tab: string; month: string }) {
   const [busy, setBusy] = useState(false);
   const [done, setDone] = useState<{ sheet: string; url: string; warnings: string[] } | null>(null);
@@ -328,7 +342,7 @@ function ItemSummary({ item, recs, days, bad }: { item: CheckItem; recs: Inspect
                   <tr key={r.id} className={r.abnormal.includes(item.id) ? 'bad-text' : ''}>
                     <td>{Number(r.date.slice(5, 7))}/{Number(r.date.slice(8))}</td>
                     <td>{r.inspector}</td>
-                    <td>{formatValue(item, r.values[item.id])}{r.abnormal.includes(item.id) ? ' ⚠' : ''}</td>
+                    <td>{formatValue(item, r.values[item.id])}{r.abnormal.includes(item.id) ? ' ⚠' : ''}{r.corrections?.some((c) => c.itemId === item.id) ? ' ✎' : ''}</td>
                   </tr>
                 ))}
               </tbody>

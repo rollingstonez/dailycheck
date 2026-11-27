@@ -201,7 +201,8 @@ function SheetPreview({ c }: { c: Checklist }) {
       <header className="top">
         <a className="link" href="#/checklists">‹ 점검표</a>
         <h1>{c.name}</h1>
-        <div className="muted small">📄 구글 시트 탭 · 항목 {c.items.length}개</div>
+        <div className="muted small">📄 {c.monthly ? `월별 탭 ${c.tabs?.length ?? 0}개` : '구글 시트 탭'} · 항목 {c.items.length}개 (가장 최근 탭 기준)</div>
+        {c.monthly && <div className="muted small">탭: {(c.tabs ?? []).map((t) => t.tab).join(', ')}</div>}
       </header>
       <div className="card notice small">
         항목 추가·수정·순서 변경은 <b>구글 시트</b>에서 하세요. 앱에서 «동기화»하면 반영됩니다.

@@ -7,7 +7,8 @@
     "dev": "vite --host",
     "build": "tsc -b && vite build",
     "preview": "vite preview --host",
-    "mock": "node mock/sheet-server.mjs"
+    "mock": "node mock/sheet-server.mjs",
+    "test:tabs": "node --experimental-strip-types --no-warnings mock/tab-parity-test.mjs"
   },
   "dependencies": {
     "dexie": "^4.0.11",
