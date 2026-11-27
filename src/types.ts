@@ -67,6 +67,8 @@ export interface InspectionRecord {
   time?: string;
   /** 항목별 사진 (photos 표의 id) */
   photos?: Record<string, string[]>;
+  /** 사진에 붙인 한 줄 설명 (항목별, 예: "호스 연결부에 기름 맺힘") */
+  photoNotes?: Record<string, string>;
   /** 시트에 올라간 사진 링크 (항목별) */
   photoLinks?: Record<string, string[]>;
   /** 구글 시트에 반영 여부 (시트 연결이 없는 점검표는 항상 false) */

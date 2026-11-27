@@ -5,6 +5,7 @@ import type { CheckItem, InspectionRecord } from '../types';
 import { criteriaText, fmtNum, formatValue, toDateStr, today } from '../util';
 import { exportRecordsCsv } from './Records';
 import { byOrder } from './Home';
+import { getConfig, makeSheetReport } from '../sheet/sync';
 
 type Mode = 'week' | 'month';
 const WEEK = ['월', '화', '수', '목', '금', '토', '일'];
@@ -81,6 +82,8 @@ export default function Report() {
           </select>
         </label>
       </div>
+
+      {mode === 'month' && checklist?.sheetTab && getConfig() && <SheetReport tab={checklist.sheetTab} month={anchor.slice(0, 7)} />}
 
       {checklist && recs && (
         <ReportBody mode={mode} title={title} name={checklist.name} currentItems={checklist.items} recs={recs} days={r.days} start={r.start} />
@@ -202,6 +205,47 @@ function ReportBody({ mode, title, name, currentItems, recs, days, start }: Body
         <button className="btn primary" onClick={() => window.print()}>🖨 인쇄 · PDF 저장</button>
         <button className="btn" disabled={!recs.length} onClick={() => exportRecordsCsv(recs, `데일리체크_${title}_${name}.csv`)}>⬇ CSV</button>
       </div>
+    </div>
+  );
+}
+
+/** 구글 시트 안에 «_월간 YYYY-MM 탭» 보고서 탭 + 그래프 만들기 */
+function SheetReport({ tab, month }: { tab: string; month: string }) {
+  const [busy, setBusy] = useState(false);
+  const [done, setDone] = useState<{ sheet: string; url: string; warnings: string[] } | null>(null);
+  const [err, setErr] = useState('');
+  useEffect(() => {
+    setDone(null);
+    setErr('');
+  }, [tab, month]);
+  async function make() {
+    setBusy(true);
+    setErr('');
+    try {
+      setDone(await makeSheetReport(tab, month));
+    } catch (e) {
+      setErr((e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  }
+  return (
+    <div className="card sheet-report no-print">
+      <div>
+        <b>📊 구글 시트에 월간 보고서 탭 만들기</b>
+        <div className="muted small">요약 · 항목별 표 · 이상/사진 목록 · 항목별 그래프가 시트 안에 생깁니다. 그래프는 구글 슬라이드에 붙여 연결할 수 있어요.</div>
+      </div>
+      <button className="btn primary" disabled={busy} onClick={make}>
+        {busy ? '만드는 중…' : done ? '다시 만들기 (최신 기록으로)' : `${Number(month.slice(5))}월 보고서 탭 만들기`}
+      </button>
+      {done && (
+        <div className="small">
+          ✅ «{done.sheet}» 탭을 만들었습니다.{' '}
+          <a href={done.url} target="_blank" rel="noreferrer">시트에서 열기 ›</a>
+          {done.warnings.length > 0 && <div className="bad-text">{done.warnings.join(' · ')}</div>}
+        </div>
+      )}
+      {err && <div className="small bad-text">{err}</div>}
     </div>
   );
 }

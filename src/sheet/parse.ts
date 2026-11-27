@@ -7,7 +7,12 @@ export interface SheetItem {
   criteria: string;
   values: Record<string, string | number>;
   photos: Record<string, string[]>;
+  /** 사진 메모에 적힌 설명 (날짜별) */
+  memos?: Record<string, string>;
 }
+
+/** 사진·메모를 모으는 행 이름. 시트에 없으면 첫 «이상 발견» 저장 때 자동으로 생긴다 */
+export const REMARK_LABEL = '특이사항';
 
 export interface SheetTab {
   tab: string;
@@ -73,6 +78,7 @@ export function toCheckItem(tab: string, si: SheetItem): CheckItem {
     sheetCriteria: rawCrit,
   };
   const c = crit.replace(/필수/g, '').trim();
+  if (/^(특이사항|비고|메모)$/.test(si.label.trim())) return base;
 
   // 1) 기준에 선택지 (on/off, up/down, 양호/보통/불량)
   if (c && c.includes('/') && !parseRange(c)) {

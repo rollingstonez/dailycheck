@@ -120,6 +120,7 @@ async function applyRead(tabs: SheetTab[]) {
         if (pending.has(date)) continue;
         const values: Record<string, ItemValue> = {};
         const photoLinks: Record<string, string[]> = {};
+        const photoNotes: Record<string, string> = {};
         let any = false;
         t.items.forEach((si, i) => {
           const v = si.values[date];
@@ -128,6 +129,7 @@ async function applyRead(tabs: SheetTab[]) {
             any = true;
           }
           if (si.photos[date]) photoLinks[items[i].id] = si.photos[date];
+          if (si.memos?.[date]) photoNotes[items[i].id] = si.memos[date];
         });
         if (!any && !t.inspector[date]) continue;
         const p = prev.get(date);
@@ -143,6 +145,7 @@ async function applyRead(tabs: SheetTab[]) {
           itemsSnapshot: items,
           photos: p?.photos,
           photoLinks,
+          photoNotes,
           createdAt: p?.createdAt ?? now,
           updatedAt: now,
           synced: true,
@@ -170,6 +173,22 @@ const blobToBase64 = (b: Blob) =>
     r.readAsDataURL(b);
   });
 
+/** 시트 «_사진기록» 칸 안에 넣을 작은 미리보기 (긴 변 240px) */
+async function thumbBase64(b: Blob): Promise<string | undefined> {
+  try {
+    const bmp = await createImageBitmap(b);
+    const s = Math.min(1, 240 / Math.max(bmp.width, bmp.height));
+    const c = document.createElement('canvas');
+    c.width = Math.round(bmp.width * s);
+    c.height = Math.round(bmp.height * s);
+    c.getContext('2d')!.drawImage(bmp, 0, 0, c.width, c.height);
+    const out = await new Promise<Blob | null>((res) => c.toBlob(res, 'image/jpeg', 0.7));
+    return out ? await blobToBase64(out) : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 async function pushRecord(cfg: SheetConfig, rec: InspectionRecord, tab: string) {
   const entries = [];
   for (const it of rec.itemsSnapshot) {
@@ -179,9 +198,10 @@ async function pushRecord(cfg: SheetConfig, rec: InspectionRecord, tab: string) 
     const photos = [];
     for (const pid of ids) {
       const p = await db.photos.get(pid);
-      if (p && !p.uploadedUrl) photos.push({ id: p.id, data: await blobToBase64(p.blob) });
+      if (p && !p.uploadedUrl) photos.push({ id: p.id, data: await blobToBase64(p.blob), thumb: await thumbBase64(p.blob) });
     }
-    entries.push({ label: it.sheetLabel, value: v === undefined || v === null ? '' : v, photos });
+    const note = rec.photoNotes?.[it.id] ?? (it.type === 'memo' && typeof v === 'string' ? v : '');
+    entries.push({ label: it.sheetLabel, value: v === undefined || v === null ? '' : v, photos, note });
   }
   const r = await call<{ missing: string[]; photos: { id: string; url: string }[] }>(cfg, {
     action: 'submit',
@@ -236,6 +256,15 @@ export function syncNow(): Promise<void> {
     }
   })();
   return running;
+}
+
+/** 시트 안에 «_월간 YYYY-MM 탭이름» 보고서 탭과 그래프를 만든다 (못 보낸 기록부터 보낸 뒤) */
+export async function makeSheetReport(tab: string, month: string) {
+  const cfg = getConfig();
+  if (!cfg) throw new Error('구글 시트가 연결되어 있지 않습니다');
+  await syncNow();
+  if (state.error) throw new Error(state.error);
+  return call<{ sheet: string; url: string; warnings: string[] }>(cfg, { action: 'report', tab, month });
 }
 
 /** 앱 시작·인터넷 복구·화면 복귀 시 자동 동기화 */

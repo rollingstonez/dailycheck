@@ -11,7 +11,7 @@ import { fileURLToPath } from 'node:url';
 const dir = path.dirname(fileURLToPath(import.meta.url));
 const ctx = vm.createContext({});
 vm.runInContext(fs.readFileSync(path.join(dir, '../apps-script/Code.gs'), 'utf8'), ctx);
-const { dc_read, dc_locate, dc_findRow, TOKEN } = ctx;
+const { dc_read, dc_locate, dc_findRow, dc_photoNote, dc_reportGrid, TOKEN, PHOTO_LOG } = ctx;
 const PORT = Number(process.env.PORT || 8787);
 
 const pad = (n) => String(n).padStart(2, '0');
@@ -41,7 +41,10 @@ function seed() {
   for (const [label, crit, f] of rows) grid.push([label, crit, ...days.map((_, i) => f(i))]);
   grid.push(['점검자', '', ...days.map((_, i) => (i % 2 ? '김점검' : '박현장'))]);
   grid.push(['점검시각', '', ...days.map(() => '08:3' + Math.floor(Math.random() * 10))]);
-  sheets['설비 일일점검'] = { grid, notes: grid.map((r) => r.map(() => '')) };
+  const notes = grid.map((r) => r.map(() => ''));
+  // 사진이 붙은 칸 예시: 온도 정상값이지만 이상해 보여 찍은 사진
+  notes[4][2 + 14] = dc_photoNote(1, '박현장', '08:31', '온도계 유리에 김이 서려 잘 안 보임', [`http://localhost:${PORT}/photos/sample.jpg`]);
+  sheets['설비 일일점검'] = { grid, notes };
 
   // 기준 열 없는 시트 (사용자가 처음 보여 준 모양 그대로)
   const g2 = [['점검사항', ...days.slice(-3)], ['밸브', 'on', 'off', 'on'], ['오일 (ml)', 120, 130, 115], ['헬륨(Kg)', 45, 42, 39], ['온도(oC)', 85, 86, 91]];
@@ -54,8 +57,39 @@ function read() {
   return {
     ok: true,
     name: '가짜 시트 (개발용)',
-    tabs: Object.entries(sheets).map(([tab, s]) => ({ tab, ...dc_read(s.grid, s.notes, fmt, YEAR) })),
+    tabs: Object.entries(sheets)
+      .filter(([tab]) => !tab.startsWith('_'))
+      .map(([tab, s]) => ({ tab, ...dc_read(s.grid, s.notes, fmt, YEAR) })),
   };
+}
+
+/** Code.gs 의 makeReport_ 와 같은 표를 만들어 «_월간 …» 탭으로 넣는다 (그래프는 목록으로만 표시) */
+function report(b) {
+  const s = sheets[b.tab];
+  if (!s) throw new Error(`시트에 "${b.tab}" 탭이 없습니다`);
+  if (!/^\d{4}-\d{2}$/.test(String(b.month))) throw new Error('보고서 달이 올바르지 않습니다: ' + b.month);
+  const now = new Date();
+  const rep = dc_reportGrid(b.tab, dc_read(s.grid, s.notes, fmt, Number(b.month.slice(0, 4))), b.month, fmt(now), `${fmt(now)} ${pad(now.getHours())}:${pad(now.getMinutes())}`);
+  const notes = rep.rows.map((r) => r.map(() => ''));
+  for (const l of rep.meta.links) notes[l.r][l.c] = l.url;
+  const grid = rep.rows.map((r) => r.slice());
+  for (const l of rep.meta.links) grid[l.r][l.c] = l.text;
+  grid.push([]);
+  grid.push([`그래프 ${rep.meta.daily.cols.length}개: ${rep.meta.daily.cols.map((c) => c.label).join(', ')}`]);
+  sheets[rep.sheetName] = { grid, notes, report: rep.meta };
+  return { ok: true, sheet: rep.sheetName, url: `http://localhost:${PORT}/#${encodeURIComponent(rep.sheetName)}`, warnings: [] };
+}
+
+function logPhotos(rows) {
+  if (!sheets[PHOTO_LOG]) {
+    const g = [['날짜', '시각', '점검표', '항목', '그때 값', '메모', '점검자', '사진', '원본']];
+    sheets[PHOTO_LOG] = { grid: g, notes: [g[0].map(() => '')] };
+  }
+  const s = sheets[PHOTO_LOG];
+  for (const p of rows) {
+    s.grid.push([p.date, p.time, p.tab, p.label, p.value, p.note, p.inspector, p.thumb ? `<img src="data:image/jpeg;base64,${p.thumb}" height=60>` : '', '열기']);
+    s.notes.push(['', '', '', '', '', '', '', '', p.url]);
+  }
 }
 
 const photoDir = path.join(dir, 'photos');
@@ -74,16 +108,23 @@ function submit(b) {
     notes.forEach((r) => r.splice(col, 0, ''));
   }
   const W = width(grid);
+  const entries = [...(b.entries || []), { label: '점검자', value: b.inspector || '' }, { label: '점검시각', value: b.time || '' }];
   for (const sp of ['점검자', '점검시각']) {
     if (dc_findRow(grid.map((r) => r[0]), sp) < 0) {
       grid.push([sp, ...Array(W - 1).fill('')]);
       notes.push(Array(W).fill(''));
     }
   }
+  // «이상 발견»용 특이사항 행이 없으면 점검자 행 바로 위에
+  if (entries.some((en) => String(en.label).trim() === '특이사항') && dc_findRow(grid.map((r) => r[0]), '특이사항') < 0) {
+    const at = dc_findRow(grid.map((r) => r[0]), '점검자');
+    grid.splice(at, 0, ['특이사항', ...Array(W - 1).fill('')]);
+    notes.splice(at, 0, Array(W).fill(''));
+  }
   const labels = grid.map((r) => String(r[0]));
   const missing = [];
   let uploaded = [];
-  const entries = [...(b.entries || []), { label: '점검자', value: b.inspector || '' }, { label: '점검시각', value: b.time || '' }];
+  const logRows = [];
   for (const en of entries) {
     const r = dc_findRow(labels, en.label);
     if (r < 0) {
@@ -98,10 +139,14 @@ function submit(b) {
         return { id: p.id, url: `http://localhost:${PORT}/photos/${name}` };
       });
       uploaded = uploaded.concat(saved);
-      const urls = saved.map((p) => p.url).join('\n');
-      notes[r][col] = notes[r][col] ? notes[r][col] + '\n' + urls : '📷 사진\n' + urls;
+      const add = dc_photoNote(saved.length, b.inspector, b.time, en.note, saved.map((p) => p.url));
+      notes[r][col] = notes[r][col] ? notes[r][col] + '\n\n' + add : add;
+      en.photos.forEach((p, i) =>
+        logRows.push({ date: b.date, time: b.time || '', tab: b.tab, label: en.label, value: en.value ?? '', note: en.note || '', inspector: b.inspector || '', url: saved[i].url, thumb: p.thumb }),
+      );
     }
   }
+  if (logRows.length) logPhotos(logRows);
   return { ok: true, column: col + 1, missing, photos: uploaded };
 }
 
@@ -110,13 +155,23 @@ function html() {
   const tabs = Object.entries(sheets)
     .map(
       ([tab, s]) =>
-        `<h2>${tab}</h2><table>${s.grid
-          .map((r, ri) => `<tr>${r.map((v, ci) => `<td${s.notes[ri]?.[ci] ? ' class=n title="' + s.notes[ri][ci] + '"' : ''}>${cell(v)}</td>`).join('')}</tr>`)
+        `<h2 id="${encodeURIComponent(tab)}">${tab}</h2><table>${s.grid
+          .map((r, ri) => {
+            const m = s.report;
+            const cls = m && (m.sections.includes(ri) ? 'sec' : m.headers.includes(ri) ? 'hd' : '');
+            return `<tr${cls ? ` class=${cls}` : ''}>${r
+              .map((v, ci) => {
+                const bad = m?.bad.some(([br, bc]) => br === ri && bc === ci) ? ' bad' : '';
+                const note = s.notes[ri]?.[ci];
+                return `<td class="${note ? 'n' : ''}${bad}"${note ? ` title="${String(note).replace(/"/g, '&quot;')}"` : ''}>${cell(v)}</td>`;
+              })
+              .join('')}</tr>`;
+          })
           .join('')}</table>`,
     )
     .join('');
   return `<!doctype html><meta charset=utf-8><meta http-equiv=refresh content=5><title>가짜 시트</title>
-<style>body{font:14px sans-serif;margin:16px}table{border-collapse:collapse}td{border:1px solid #ccc;padding:4px 8px;white-space:nowrap}tr:first-child td{background:#eef}td.n{background:#ffe9a8}</style>
+<style>body{font:14px sans-serif;margin:16px}table{border-collapse:collapse}td{border:1px solid #ccc;padding:4px 8px;white-space:nowrap}tr:first-child td{background:#eef}td.n{background:#fce8b2}td.bad{color:#d93025;font-weight:bold}tr.sec td{background:#e8f0fe;font-weight:bold}tr.hd td{background:#f1f3f4;font-weight:bold}</style>
 <p>개발용 가짜 구글 시트 · 5초마다 새로고침 · 노란 칸 = 사진 메모</p>${tabs}`;
 }
 
@@ -136,7 +191,8 @@ http
       try {
         const b = JSON.parse(body);
         if (TOKEN && b.token !== TOKEN) throw new Error('비밀번호가 맞지 않습니다');
-        out = b.action === 'read' ? read() : b.action === 'submit' ? submit(b) : { ok: false, error: '알 수 없는 요청' };
+        out =
+          b.action === 'read' ? read() : b.action === 'submit' ? submit(b) : b.action === 'report' ? report(b) : { ok: false, error: '알 수 없는 요청' };
       } catch (e) {
         out = { ok: false, error: String(e.message || e) };
       }

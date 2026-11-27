@@ -6,6 +6,7 @@ import type { CheckItem, InspectionRecord, ItemValue } from '../types';
 import { compressImage, criteriaText, hhmm, isAbnormal, stampNow, today, uid } from '../util';
 import PhotoThumb from '../components/PhotoThumb';
 import { sheetRecordId, syncNow } from '../sheet/sync';
+import { REMARK_LABEL, sheetItemId } from '../sheet/parse';
 
 const INSPECTOR_KEY = 'dc:inspector';
 
@@ -23,6 +24,7 @@ export default function Inspect({ checklistId, recordId }: Props) {
   const [existing, setExisting] = useState<InspectionRecord | null | undefined>(undefined);
   const [values, setValues] = useState<Record<string, ItemValue>>({});
   const [photos, setPhotos] = useState<Photos>({});
+  const [notes, setNotes] = useState<Record<string, string>>({});
   const [inspector, setInspector] = useState(() => localStorage.getItem(INSPECTOR_KEY) ?? '');
   const [date, setDate] = useState(today());
   const [missing, setMissing] = useState<string[]>([]);
@@ -41,10 +43,12 @@ export default function Inspect({ checklistId, recordId }: Props) {
         const d = JSON.parse(draft);
         setValues(d.values ?? {});
         setPhotos(d.photos ?? {});
+        setNotes(d.notes ?? {});
         if (d.date) setDate(d.date);
       } else if (rec) {
         setValues(rec.values);
         setPhotos(rec.photos ?? {});
+        setNotes(rec.photoNotes ?? {});
         setDate(rec.date);
         if (rec.inspector) setInspector(rec.inspector);
       }
@@ -54,13 +58,23 @@ export default function Inspect({ checklistId, recordId }: Props) {
 
   // 입력 도중 앱이 꺼져도 이어서 쓸 수 있도록 임시 저장
   useEffect(() => {
-    if (loaded.current) localStorage.setItem(draftKey, JSON.stringify({ values, photos, date }));
-  }, [values, photos, date, draftKey]);
+    if (loaded.current) localStorage.setItem(draftKey, JSON.stringify({ values, photos, notes, date }));
+  }, [values, photos, notes, date, draftKey]);
 
   if (checklist === undefined || existing === undefined) return null;
   if (checklist === null) return <div className="page">점검표를 찾을 수 없습니다.</div>;
 
   const items = checklist.items;
+  // «이상 발견» 사진·메모가 들어갈 행: 점검표에 특이사항 항목이 있으면 그것, 없으면 저장 때 새로 만든다
+  const remarkInList = items.find((i) => (i.sheetLabel ?? i.label).trim() === REMARK_LABEL);
+  const remark: CheckItem = remarkInList ?? {
+    id: checklist.sheetTab ? sheetItemId(checklist.sheetTab, REMARK_LABEL) : 'remark',
+    label: REMARK_LABEL,
+    type: 'memo',
+    required: false,
+    sheetLabel: checklist.sheetTab ? REMARK_LABEL : undefined,
+  };
+  const remarkUsed = !remarkInList && (hasValue(values[remark.id]) || (photos[remark.id]?.length ?? 0) > 0);
   const filledOf = (i: CheckItem) => (i.type === 'photo' ? (photos[i.id]?.length ?? 0) > 0 : hasValue(values[i.id]));
   const set = (id: string, v: ItemValue) => {
     setValues((p) => ({ ...p, [id]: v }));
@@ -104,6 +118,8 @@ export default function Inspect({ checklistId, recordId }: Props) {
     localStorage.setItem(INSPECTOR_KEY, inspector.trim());
     const now = Date.now();
     const cleanPhotos = Object.fromEntries(Object.entries(photos).filter(([, v]) => v.length));
+    const cleanNotes = Object.fromEntries(Object.entries(notes).filter(([id, v]) => v.trim() && cleanPhotos[id]).map(([id, v]) => [id, v.trim()]));
+    const snapItems = remarkUsed ? [...items, remark] : items;
     const rec: InspectionRecord = {
       id: finalId,
       checklistId: checklist!.id,
@@ -113,9 +129,10 @@ export default function Inspect({ checklistId, recordId }: Props) {
       inspector: inspector.trim(),
       values,
       photos: cleanPhotos,
+      photoNotes: cleanNotes,
       photoLinks: existing?.date === date ? existing?.photoLinks : undefined,
       abnormal: abnormalNow.map((i) => i.id),
-      itemsSnapshot: existing && !checklist!.sheetTab ? mergeSnapshot(existing.itemsSnapshot, items) : items,
+      itemsSnapshot: existing && !checklist!.sheetTab ? mergeSnapshot(existing.itemsSnapshot, snapItems) : snapItems,
       createdAt: existing?.createdAt ?? now,
       updatedAt: now,
       synced: false,
@@ -173,6 +190,8 @@ export default function Inspect({ checklistId, recordId }: Props) {
             onChange={(v) => set(item.id, v)}
             photos={photos[item.id] ?? []}
             onPhotos={(ids) => setItemPhotos(item.id, ids)}
+            note={notes[item.id] ?? ''}
+            onNote={(t) => setNotes((p) => ({ ...p, [item.id]: t }))}
             missing={missing.includes(item.id)}
             recordId={tempId}
             stamp={[checklist.name, item.label + (item.unit ? ` (${item.unit})` : '')]}
@@ -180,6 +199,41 @@ export default function Inspect({ checklistId, recordId }: Props) {
         ))}
         {items.length === 0 && <div className="empty muted">항목이 없습니다.</div>}
       </div>
+
+      {remarkInList ? (
+        <button className="btn found" onClick={() => document.getElementById('item-' + remarkInList.id)?.scrollIntoView({ behavior: 'smooth', block: 'center' })}>
+          📷 점검표에 없는 이상 발견 → {REMARK_LABEL}에 사진·메모
+        </button>
+      ) : (
+        <div className="card found-card">
+          <div className="found-head">
+            <div>
+              <b>점검표에 없는 이상 발견</b>
+              <div className="muted small">바닥 누유, 이상한 소리 등 — 사진과 한 줄 메모는 시트 «{REMARK_LABEL}» 행에 들어갑니다</div>
+            </div>
+            <PhotoButton
+              ids={photos[remark.id] ?? []}
+              onChange={(ids) => setItemPhotos(remark.id, ids)}
+              recordId={tempId}
+              stamp={[checklist.name, '이상 발견']}
+              highlight
+            />
+          </div>
+          <input
+            className="ri-in ri-memo"
+            value={(values[remark.id] as string) ?? ''}
+            onChange={(e) => set(remark.id, e.target.value)}
+            placeholder="무엇이 이상한가요? (예: 3번 기계 아래 기름 자국)"
+          />
+          {(photos[remark.id]?.length ?? 0) > 0 && (
+            <div className="photos sm">
+              {photos[remark.id].map((id) => (
+                <PhotoThumb key={id} id={id} onRemove={() => setItemPhotos(remark.id, photos[remark.id].filter((x) => x !== id))} />
+              ))}
+            </div>
+          )}
+        </div>
+      )}
 
       <div className="savebar">
         {abnormalNow.length > 0 && (
@@ -206,16 +260,19 @@ interface RowProps {
   onChange: (v: ItemValue) => void;
   photos: string[];
   onPhotos: (ids: string[]) => void;
+  note: string;
+  onNote: (t: string) => void;
   missing: boolean;
   recordId: string;
   stamp: string[];
 }
 
 /** 시트의 한 행 = 화면의 한 줄:  [유량]  (ml)  [ 150 ]  📷 */
-function ItemRow({ item, value, onChange, photos, onPhotos, missing, recordId, stamp }: RowProps) {
+function ItemRow({ item, value, onChange, photos, onPhotos, note, onNote, missing, recordId, stamp }: RowProps) {
   const bad = isAbnormal(item, value);
   const crit = criteriaText(item);
-  const showCam = item.photo || item.type === 'photo' || bad || photos.length > 0;
+  // 📷 는 어느 항목에나 항상 있다. 사진이 필요한 항목·기준 벗어난 항목에서만 진하게
+  const camStrong = item.photo || item.type === 'photo' || bad || photos.length > 0;
   const wide = item.type === 'memo' || (item.type === 'choice' && ((item.options?.length ?? 0) > 2 || (item.options ?? []).some((o) => o.length > 4)));
 
   return (
@@ -228,7 +285,7 @@ function ItemRow({ item, value, onChange, photos, onPhotos, missing, recordId, s
         </div>
         {item.type === 'number' && <div className="ri-unit">{item.unit ? `(${item.unit})` : ''}</div>}
         {!wide && item.type !== 'photo' && <ItemInput item={item} value={value} onChange={onChange} />}
-        {showCam && <PhotoButton ids={photos} onChange={onPhotos} recordId={recordId} stamp={stamp} highlight={!!item.photo && photos.length === 0} />}
+        <PhotoButton ids={photos} onChange={onPhotos} recordId={recordId} stamp={stamp} highlight={!!item.photo && photos.length === 0} dim={!camStrong} />
       </div>
       {wide && <ItemInput item={item} value={value} onChange={onChange} />}
       {photos.length > 0 && (
@@ -237,6 +294,9 @@ function ItemRow({ item, value, onChange, photos, onPhotos, missing, recordId, s
             <PhotoThumb key={id} id={id} onRemove={() => onPhotos(photos.filter((x) => x !== id))} />
           ))}
         </div>
+      )}
+      {photos.length > 0 && item.type !== 'memo' && (
+        <input className="ri-in ri-memo ri-note" value={note} onChange={(e) => onNote(e.target.value)} placeholder="무엇이 이상한가요? (선택)" />
       )}
     </div>
   );
@@ -323,7 +383,7 @@ function NumberInput({ value, onChange }: { value: ItemValue | undefined; onChan
   );
 }
 
-function PhotoButton({ ids, onChange, recordId, stamp, highlight }: { ids: string[]; onChange: (ids: string[]) => void; recordId: string; stamp: string[]; highlight: boolean }) {
+function PhotoButton({ ids, onChange, recordId, stamp, highlight, dim }: { ids: string[]; onChange: (ids: string[]) => void; recordId: string; stamp: string[]; highlight: boolean; dim?: boolean }) {
   const ref = useRef<HTMLInputElement>(null);
   const [busy, setBusy] = useState(false);
   async function add(files: FileList | null) {
@@ -348,7 +408,7 @@ function PhotoButton({ ids, onChange, recordId, stamp, highlight }: { ids: strin
   return (
     <>
       <input ref={ref} type="file" accept="image/*" capture="environment" hidden onChange={(e) => add(e.target.files)} />
-      <button className={'ri-cam ' + (highlight ? 'hl' : '')} disabled={busy} aria-label="사진 찍기" onClick={() => ref.current?.click()}>
+      <button className={'ri-cam ' + (highlight ? 'hl ' : '') + (dim ? 'dim' : '')} disabled={busy} aria-label="사진 찍기" onClick={() => ref.current?.click()}>
         {busy ? '…' : '📷'}
         {ids.length > 0 && <span className="cnt">{ids.length}</span>}
       </button>
