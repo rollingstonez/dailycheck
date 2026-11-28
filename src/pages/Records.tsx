@@ -28,7 +28,7 @@ export default function Records() {
 
   function exportCsv() {
     if (!recs?.length) return;
-    exportRecordsCsv(recs, `데일리체크_${month}${listId ? '_' + recs[0].checklistName : ''}.csv`);
+    exportRecordsCsv(recs, `DayByCheck_${month}${listId ? '_' + recs[0].checklistName : ''}.csv`);
   }
 
   return (

@@ -1,5 +1,5 @@
 /**
- * 데일리체크 ↔ 구글 시트 연결 스크립트
+ * DayByCheck ↔ 구글 시트 연결 스크립트
  *
  * 시트 모양 (탭 하나 = 점검표 하나)
  *   A열: 점검사항   예) 밸브, 오일 (ml), 헬륨(Kg), 온도(℃)
@@ -22,8 +22,8 @@ var LOG_TAB = '_기록';   // 입력·정정 장부 (덧붙이기만 함, 숨김
 var CORR_TAB = '_정정'; // 정정 내역만 따로 (앱이 읽어서 «정정됨»으로 표시)
 var LOG_HEADER = ['시각', '구분', '탭', '날짜', '항목', '값', '이전값', '사유', '점검자'];
 var CORR_HEADER = ['시각', '탭', '날짜', '항목', '이전값', '정정값', '사유', '정정자'];
-var PROTECT_DESC = '데일리체크 기록 보호'; // 스크립트가 거는 시트 보호의 이름
-var PHOTO_FOLDER = '데일리체크 사진';
+var PROTECT_DESC = '데일리체크 기록 보호'; // 스크립트가 거는 시트 보호의 이름 (기존 시트의 보호를 찾는 기준이라 이름 변경 후에도 그대로 둠)
+var PHOTO_FOLDER = '데일리체크 사진'; // 기존 사진이 있는 드라이브 폴더라 이름 변경 후에도 그대로 둠
 var SPECIAL_INSPECTOR = '점검자';
 var SPECIAL_TIME = '점검시각';
 var SPECIAL_REMARK = '특이사항'; // 점검표에 없는 이상을 적는 행 (없으면 첫 저장 때 자동으로 만든다)
@@ -33,7 +33,7 @@ var PHOTO_COLOR = '#fce8b2';   // 사진이 있는 칸 배경 (연한 주황)
 /* ───────────── 구글 시트에서 실행되는 부분 ───────────── */
 
 function doGet() {
-  return json_({ ok: true, message: '데일리체크 연결 스크립트가 작동 중입니다. 이 주소를 앱에 넣으세요.' });
+  return json_({ ok: true, message: 'DayByCheck 연결 스크립트가 작동 중입니다. 이 주소를 앱에 넣으세요.' });
 }
 
 function doPost(e) {
@@ -847,7 +847,7 @@ function dc_sameStructure(rows, tab, items) {
 
 function onOpen() {
   SpreadsheetApp.getUi()
-    .createMenu('데일리체크')
+    .createMenu('DayByCheck')
     .addItem('이번 달 보고서 만들기', 'menuThisMonth')
     .addItem('지난달 보고서 만들기', 'menuLastMonth')
     .addSeparator()

@@ -217,7 +217,7 @@ function ReportBody({ mode, title, name, currentItems, recs, days, start }: Body
 
       <div className="row-btns no-print">
         <button className="btn primary" onClick={() => window.print()}>🖨 인쇄 · PDF 저장</button>
-        <button className="btn" disabled={!recs.length} onClick={() => exportRecordsCsv(recs, `데일리체크_${title}_${name}.csv`)}>⬇ CSV</button>
+        <button className="btn" disabled={!recs.length} onClick={() => exportRecordsCsv(recs, `DayByCheck_${title}_${name}.csv`)}>⬇ CSV</button>
       </div>
     </div>
   );

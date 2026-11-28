@@ -4,13 +4,13 @@ import { TEMPLATES } from './templates';
 import { uid } from './util';
 
 /** 기기 안(IndexedDB)에 저장 → 인터넷이 없어도 입력·조회 가능 */
-class DailyCheckDB extends Dexie {
+class DayByCheckDB extends Dexie {
   checklists!: Table<Checklist, string>;
   records!: Table<InspectionRecord, string>;
   photos!: Table<Photo, string>;
 
   constructor() {
-    super('dailycheck');
+    super('dailycheck'); // 기존 기기에 저장된 기록을 유지하려고 DB 이름은 그대로 둠
     this.version(1).stores({
       checklists: 'id, name, updatedAt',
       records: 'id, checklistId, date, [checklistId+date], synced',
@@ -19,7 +19,7 @@ class DailyCheckDB extends Dexie {
   }
 }
 
-export const db = new DailyCheckDB();
+export const db = new DayByCheckDB();
 
 /** 처음 실행 시 예시 점검표를 하나 넣어 둔다 */
 export async function seedIfEmpty() {

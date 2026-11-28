@@ -1,7 +1,7 @@
 {
   "version": "0.0.1",
   "configurations": [
-    { "name": "dailycheck", "runtimeExecutable": "npx", "runtimeArgs": ["vite", "--port", "5173", "--strictPort"], "port": 5173 },
+    { "name": "daybycheck", "runtimeExecutable": "npx", "runtimeArgs": ["vite", "--port", "5173", "--strictPort"], "port": 5173 },
     { "name": "mock-sheet", "runtimeExecutable": "node", "runtimeArgs": ["mock/sheet-server.mjs"], "port": 8787 }
   ]
 }

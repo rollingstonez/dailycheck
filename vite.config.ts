@@ -9,8 +9,8 @@ export default defineConfig({
       registerType: 'autoUpdate',
       includeAssets: ['icon.svg'],
       manifest: {
-        name: '데일리체크',
-        short_name: '데일리체크',
+        name: 'DayByCheck',
+        short_name: 'DayByCheck',
         description: '현장 일일 점검 기록 앱',
         lang: 'ko',
         theme_color: '#1f6feb',
